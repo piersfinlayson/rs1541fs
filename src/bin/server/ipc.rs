@@ -1,4 +1,3 @@
-use crate::mount::MountConfig;
 use rs1541fs::ipc::{Request, Response, SOCKET_PATH};
 use rs1541fs::validate::{validate_device, validate_mountpoint, DeviceValidation};
 
@@ -81,13 +80,17 @@ fn handle_mount(mountpoint: String, device: u8, dummy_formats: bool, bus_reset: 
             // Assert returned path is the same - cos we have said don't
             // canonicalize
             assert_eq!(path, rpath);
-        },
+        }
         Err(e) => return Response::Error(e),
     };
 
     // No validation checking required for other args
-    if (dummy_formats) { debug!("Dummy formatting requested")};
-    if (bus_reset) { debug!("Bus reset requested")};
+    if dummy_formats {
+        debug!("Dummy formatting requested")
+    };
+    if bus_reset {
+        debug!("Bus reset requested")
+    };
 
     // TO DO - actually handle the mount
 
@@ -109,12 +112,13 @@ fn handle_unmount(mountpoint: Option<String>, device: Option<u8>) -> Response {
 
     // Validate that only one of mountpoint or device is Some
     if mountpoint.is_some() && device.is_some() {
-        return Response::Error(format!("For an unmount only one of mountpoint or device must be specified"));
+        return Response::Error(format!(
+            "For an unmount only one of mountpoint or device must be specified"
+        ));
     }
 
     // Validate the mountpoint
-    if (mountpoint.is_some())
-    {
+    if mountpoint.is_some() {
         let mountpoint_str = mountpoint.unwrap();
         let path = Path::new(&mountpoint_str);
         match validate_mountpoint(path, false, false) {
@@ -122,14 +126,13 @@ fn handle_unmount(mountpoint: Option<String>, device: Option<u8>) -> Response {
                 // Assert returned path is the same - cos we have said don't
                 // canonicalize
                 assert_eq!(path, rpath);
-            },
+            }
             Err(e) => return Response::Error(e),
         };
     }
 
     // Validate the device
-    if (device.is_some())
-    {
+    if device.is_some() {
         match validate_device(device, DeviceValidation::Required) {
             Ok(validated_device) => {
                 assert_eq!(validated_device, device);

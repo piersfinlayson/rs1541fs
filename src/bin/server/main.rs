@@ -1,15 +1,10 @@
-mod cbm;
-mod fuse;
 mod ipc;
-mod mount;
 mod signal;
 
 use ipc::run_server;
 use rs1541fs::logging::init_logging;
 
-use cbm::with_cbm;
 use daemonize::Daemonize;
-use fuser::MountOption;
 use log::{debug, error, info};
 use signal::{create_signal_handler, get_pid_filename};
 use std::fs;
@@ -17,7 +12,7 @@ use std::path::Path;
 
 fn check_pid_file() -> Result<(), std::io::Error> {
     let pid_file = get_pid_filename();
-    if let Ok(metadata) = fs::metadata(&pid_file) {
+    if let Ok(_) = fs::metadata(&pid_file) {
         // PID file exists
         if let Ok(content) = fs::read_to_string(&pid_file) {
             if let Ok(pid) = content.trim().parse::<i32>() {
@@ -36,10 +31,6 @@ fn check_pid_file() -> Result<(), std::io::Error> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize logger
-    init_logging(true, env!("CARGO_BIN_NAME").into());
-    debug!("Logging initialized");
-
     // Daemonize - must do so before setting up our signal
     // handler.
     check_pid_file()?;
@@ -51,10 +42,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match daemonize.start() {
         Ok(_) => info!("Daemonized at pid {}", std::process::id()),
         Err(e) => {
-            error!("Failed to dameonize, {}", e);
+            eprintln!("Failed to dameonize, {}", e);
             return Err(Box::new(e));
         }
     }
+
+    // Initialize logger
+    // We do this after daemonizing so the PID used in syslog is the PID of
+    // the daemon
+    init_logging(true, env!("CARGO_BIN_NAME").into());
+    debug!("Logging initialized");
 
     // Set up signal handler as a lazy_static
     // We do this to ensure it is retained for the lifetime of the program
@@ -63,15 +60,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // should clean up OK - except there is a small window where the pid file
     // has been created but not deleted.  Nothing we can do.
     create_signal_handler();
-
-    // Set up fuser options
-    //let _fuser_options = with_cbm(|cbm| {
-    //    vec![
-    //        MountOption::RO,
-    //        MountOption::FSName(cbm.get_device_name()),
-    //        MountOption::Subtype(cbm.get_sub_type()),
-    //    ]
-    //});
 
     // Start the server and loop forever listening for mount/unmount requests
     run_server()?;
