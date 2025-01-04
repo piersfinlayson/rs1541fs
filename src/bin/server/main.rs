@@ -74,9 +74,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     defer! {
         if Path::new(&get_pid_filename()).exists() {
             info!("Removing pidfile");
-            info!("----- Exiting -----");
             let _ = fs::remove_file(get_pid_filename());
         }
+        info!("----- Exiting -----");
     }
 
     // Set up signal handler as a lazy_static
