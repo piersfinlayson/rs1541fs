@@ -29,7 +29,7 @@ const STARTUP_TIMEOUT: Duration = Duration::from_millis(100);
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(test)]
 const OPERATION_TIMEOUT: Duration = Duration::from_millis(100);
-const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(100);
+const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(1000);
 const MAX_RESPONSE_SIZE: usize = 1024 * 1024; // 1MB limit
 
 #[derive(thiserror::Error, Debug)]

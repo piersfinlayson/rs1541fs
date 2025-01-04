@@ -236,7 +236,7 @@ pub fn run_server() -> Result<()> {
         }
     }
 
-    info!("Server accept loop terminated");
+    info!("IPC server loop terminated");
     cleanup_socket();
     Ok(())
 }
