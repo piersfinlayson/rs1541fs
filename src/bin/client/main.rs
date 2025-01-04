@@ -207,11 +207,9 @@ fn create_request(validated_args: &ValidatedArgs) -> Request {
     if !validated_args.mount && !validated_args.unmount {
         if validated_args.bus_reset {
             Request::BusReset
-        }
-        else if validated_args.kill {
+        } else if validated_args.kill {
             Request::Die
-        }
-        else {
+        } else {
             unreachable!();
         }
     } else if validated_args.mount {

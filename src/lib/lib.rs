@@ -1,7 +1,10 @@
+pub mod cbm;
 pub mod ipc;
 pub mod logging;
-pub mod opencbm;
 pub mod validate;
+
+// Contains ffi wrappers - not be used outside this library
+mod opencbm;
 
 pub const MIN_DEVICE_NUM: u8 = 8;
 pub const MAX_DEVICE_NUM: u8 = 15;

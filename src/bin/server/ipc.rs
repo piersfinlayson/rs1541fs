@@ -1,3 +1,4 @@
+use rs1541fs::cbm::Cbm;
 use rs1541fs::ipc::{Request, Response, SOCKET_PATH};
 use rs1541fs::validate::{validate_device, validate_mountpoint, DeviceValidation};
 
@@ -7,10 +8,11 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-fn handle_client_request(stream: &mut UnixStream) -> Result<()> {
+fn handle_client_request(cbm: Arc<Mutex<Cbm>>, stream: &mut UnixStream) -> Result<()> {
     // Set read timeout to prevent hanging
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -39,7 +41,7 @@ fn handle_client_request(stream: &mut UnixStream) -> Result<()> {
             bus_reset,
         } => handle_mount(mountpoint, device, dummy_formats, bus_reset),
         Request::Unmount { mountpoint, device } => handle_unmount(mountpoint, device),
-        Request::BusReset => handle_bus_reset(),
+        Request::BusReset => handle_bus_reset(cbm),
         Request::Ping => handle_ping(),
         Request::Die => handle_die(),
     };
@@ -149,10 +151,19 @@ fn handle_unmount(mountpoint: Option<String>, device: Option<u8>) -> Response {
     return Response::UnmountSuccess;
 }
 
-fn handle_bus_reset() -> Response {
+fn handle_bus_reset(cbm: Arc<Mutex<Cbm>>) -> Response {
     info!("Request: Bus reset");
 
-    // TO DO: actually handle the bus reset
+    cbm.lock()
+        .map_err(|e| format!("Failed to acquire cbm lock {}", e))
+        .and_then(|mutex| mutex.reset_bus())
+        .map_or_else(
+            |e| Response::Error(e),
+            |_| {
+                debug!("Bus reset completed successfully");
+                Response::BusResetSuccess
+            },
+        );
 
     debug!("Bus reset completed successfully");
     return Response::BusResetSuccess;
@@ -207,7 +218,7 @@ fn setup_socket() -> Result<UnixListener> {
     UnixListener::bind(SOCKET_PATH).map_err(|e| anyhow!("Failed to create socket: {}", e))
 }
 
-pub fn run_server() -> Result<()> {
+pub fn run_server(cbm: &Arc<Mutex<Cbm>>) -> Result<()> {
     let listener = setup_socket()?;
 
     // Set socket timeout to 1 second
@@ -219,8 +230,9 @@ pub fn run_server() -> Result<()> {
         match listener.accept() {
             Ok((mut stream, _addr)) => {
                 debug!("IPC server accepted new connection");
+                let cbm_clone = Arc::clone(cbm);
                 thread::spawn(move || {
-                    if let Err(e) = handle_client_request(&mut stream) {
+                    if let Err(e) = handle_client_request(cbm_clone, &mut stream) {
                         error!("Error handling client request: {}", e);
                     }
                 });

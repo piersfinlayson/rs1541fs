@@ -2,8 +2,8 @@ mod ipc;
 mod signal;
 
 use ipc::run_server;
+use rs1541fs::cbm::Cbm;
 use rs1541fs::logging::init_logging;
-use rs1541fs::opencbm::OpenCbm;
 
 use daemonize::Daemonize;
 use log::{debug, error, info};
@@ -12,6 +12,7 @@ use signal::{create_signal_handler, get_pid_filename};
 use std::fs;
 use std::panic;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 fn check_pid_file() -> Result<(), std::io::Error> {
     let pid_file = get_pid_filename();
@@ -87,7 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     create_signal_handler();
 
     // Connect to OpenCBM and open the XUM1541 device
-    let cbm = OpenCbm::new().map_err(|e| -> Box<dyn std::error::Error> {
+    let cbm = Cbm::new().map_err(|e| -> Box<dyn std::error::Error> {
         let error_string = format!("Failed to open XUM1541 device: {}", e);
         error!("{}", error_string);
         error_string.into()
@@ -95,15 +96,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Start the server and loop forever listening for mount/unmount requests
     debug!("Start IPC server");
-    run_server()?;
+    let shared_cbm = Arc::new(Mutex::new(cbm));
+    run_server(&shared_cbm)?;
     debug!("IPC server exited");
 
-    // Explicitly drop CBM so the driver is closed at this point
-    debug!("Close XUM1541 device");
-    drop(cbm);
+    // Cannot explicitly drop CBM so the driver is closed at this point
+    // However, once all the threads with copies of cbm exit it should be
+    // dropped and the driver closed.  If we kept track of all of the threads
+    // we spawned we could join to them here and explicitly wait til they end.
+    // debug!("Close XUM1541 device");
+    // drop(cbm);
 
     // Exit from main()
     // Note that the deferred code will now run, as well as Rust dropping
-    // anything we didn't explicitly drop already 
+    // anything we didn't explicitly drop already
     Ok(())
 }
