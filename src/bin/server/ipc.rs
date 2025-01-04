@@ -1,5 +1,6 @@
 use crate::mount::MountConfig;
 use rs1541fs::ipc::{Request, Response, SOCKET_PATH};
+use rs1541fs::validate::{validate_device, validate_mountpoint, DeviceValidation};
 
 use anyhow::{anyhow, Result};
 use log::{debug, error, info};
@@ -31,32 +32,15 @@ fn handle_client_request(stream: &mut UnixStream) -> Result<()> {
     };
 
     let response = match request {
-        Request::Mount { .. } => match MountConfig::from_mount_request(&request) {
-            Ok(mc) => {
-                info!("Mount {}", mc.mountpoint.display());
-                Response::MountSuccess
-            }
-            Err(e) => {
-                error!("Failed to create mount config: {}", e);
-                Response::Error(e.to_string())
-            }
-        },
-        Request::Unmount { mountpoint, device } => {
-            info!(
-                "Unmount device {} or mountpoint {}",
-                device.map_or(String::new(), |n| n.to_string()),
-                mountpoint.unwrap_or(String::new())
-            );
-            Response::UnmountSuccess
-        }
-        Request::BusReset => {
-            info!("Bus reset");
-            Response::BusResetAck
-        }
-        Request::Ping => {
-            debug!("Processing ping request");
-            Response::Pong
-        }
+        Request::Mount {
+            mountpoint,
+            device,
+            dummy_formats,
+            bus_reset,
+        } => handle_mount(mountpoint, device, dummy_formats, bus_reset),
+        Request::Unmount { mountpoint, device } => handle_unmount(mountpoint, device),
+        Request::BusReset => handle_bus_reset(),
+        Request::Ping => handle_ping(),
     };
 
     match send_response(stream, response) {
@@ -70,6 +54,109 @@ fn handle_client_request(stream: &mut UnixStream) -> Result<()> {
             }
         }
     }
+}
+
+fn handle_mount(mountpoint: String, device: u8, dummy_formats: bool, bus_reset: bool) -> Response {
+    info!("Request: Mount device {} at {}", device, mountpoint.clone());
+
+    // Check device num validates OK
+    // If the validation fails, return a Response:Error
+    // If it returns OK, assert that we got given the same device number - it
+    // shouldn't change if it was validate, as we are doing Required
+    // validation which doesn't return a default value, or otherwise change it
+    match validate_device(Some(device), DeviceValidation::Required) {
+        Ok(validated_device) => {
+            assert!(validated_device.is_some());
+            assert_eq!(validated_device.unwrap(), device);
+        }
+        Err(e) => return Response::Error(e),
+    }
+
+    // Check the mountpoint passed in (converting to a path type first)
+    // We want to set is_mount to true and don't want to automatically
+    // canonicalize - the client should pass it in already canonicalized
+    let path = Path::new(&mountpoint);
+    match validate_mountpoint(path, true, false) {
+        Ok(rpath) => {
+            // Assert returned path is the same - cos we have said don't
+            // canonicalize
+            assert_eq!(path, rpath);
+        },
+        Err(e) => return Response::Error(e),
+    };
+
+    // No validation checking required for other args
+    if (dummy_formats) { debug!("Dummy formatting requested")};
+    if (bus_reset) { debug!("Bus reset requested")};
+
+    // TO DO - actually handle the mount
+
+    debug!("Mount completed successfully");
+    return Response::MountSuccess;
+}
+
+fn handle_unmount(mountpoint: Option<String>, device: Option<u8>) -> Response {
+    info!(
+        "Request: Unmount device {} or mountpoint {}",
+        device.unwrap_or_default(),
+        mountpoint.clone().unwrap_or_default()
+    );
+
+    // Validate that at least one of mountpoint or device is Some
+    if mountpoint.is_none() && device.is_none() {
+        return Response::Error(format!("Either mountpoint or device must be specified"));
+    }
+
+    // Validate that only one of mountpoint or device is Some
+    if mountpoint.is_some() && device.is_some() {
+        return Response::Error(format!("For an unmount only one of mountpoint or device must be specified"));
+    }
+
+    // Validate the mountpoint
+    if (mountpoint.is_some())
+    {
+        let mountpoint_str = mountpoint.unwrap();
+        let path = Path::new(&mountpoint_str);
+        match validate_mountpoint(path, false, false) {
+            Ok(rpath) => {
+                // Assert returned path is the same - cos we have said don't
+                // canonicalize
+                assert_eq!(path, rpath);
+            },
+            Err(e) => return Response::Error(e),
+        };
+    }
+
+    // Validate the device
+    if (device.is_some())
+    {
+        match validate_device(device, DeviceValidation::Required) {
+            Ok(validated_device) => {
+                assert_eq!(validated_device, device);
+            }
+            Err(e) => return Response::Error(e),
+        };
+    }
+
+    // TO DO: actually handle the unmount
+
+    debug!("Unmount completed successfully");
+    return Response::UnmountSuccess;
+}
+
+fn handle_bus_reset() -> Response {
+    info!("Request: Bus reset");
+
+    // TO DO: actually handle the bus reset
+
+    debug!("Bus reset completed successfully");
+    return Response::BusResetSuccess;
+}
+
+fn handle_ping() -> Response {
+    info!("Request: Ping");
+    debug!("Send pong");
+    Response::Pong
 }
 
 fn send_response(stream: &mut UnixStream, response: Response) -> Result<()> {

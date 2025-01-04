@@ -279,7 +279,7 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
-        Response::BusResetAck => {
+        Response::BusResetSuccess => {
             info!("Successfully instructed daemon to reset the bus");
             Ok(())
         }
@@ -479,4 +479,3 @@ fn test_command_env_if_exists() {
         key.to_str().unwrap() == "TEST_VAR" && value.unwrap().to_str().unwrap() == "test_value"
     }));
 }
-

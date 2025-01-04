@@ -25,7 +25,7 @@ pub enum Request {
 pub enum Response {
     MountSuccess,
     UnmountSuccess,
-    BusResetAck,
+    BusResetSuccess,
     Error(String),
     Pong,
 }
