@@ -1,4 +1,4 @@
-use rs1541fs::mountpoint::validate_mountpoint;
+use rs1541fs::validate::validate_mountpoint;
 use rs1541fs::{DEFAULT_DEVICE_NUM, MAX_DEVICE_NUM, MIN_DEVICE_NUM};
 
 use clap::{ArgAction, Parser};

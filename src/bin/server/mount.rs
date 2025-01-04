@@ -1,6 +1,6 @@
 use log::{debug, error};
 use rs1541fs::ipc::Request;
-use rs1541fs::mountpoint::validate_mountpoint;
+use rs1541fs::validate::validate_mountpoint;
 use rs1541fs::{MAX_DEVICE_NUM, MIN_DEVICE_NUM};
 use std::path::PathBuf;
 use thiserror::Error;

@@ -1,6 +1,6 @@
 pub mod ipc;
 pub mod logging;
-pub mod mountpoint;
+pub mod validate;
 
 pub const MIN_DEVICE_NUM: u8 = 8;
 pub const MAX_DEVICE_NUM: u8 = 15;
