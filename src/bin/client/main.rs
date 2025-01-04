@@ -205,7 +205,15 @@ fn send_request(request: Request) -> Result<Response, ClientError> {
 
 fn create_request(validated_args: &ValidatedArgs) -> Request {
     if !validated_args.mount && !validated_args.unmount {
-        Request::BusReset
+        if validated_args.bus_reset {
+            Request::BusReset
+        }
+        else if validated_args.kill {
+            Request::Die
+        }
+        else {
+            unreachable!();
+        }
     } else if validated_args.mount {
         Request::Mount {
             mountpoint: validated_args
@@ -285,6 +293,10 @@ fn main() -> Result<()> {
         }
         Response::Pong => {
             info!("Successfully received ping response from daemon");
+            Ok(())
+        }
+        Response::Dying => {
+            info!("Successfully received dying respose from daemon");
             Ok(())
         }
     }

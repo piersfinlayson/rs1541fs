@@ -65,7 +65,6 @@ impl SignalHandler {
             }
         });
 
-
         Ok(SignalHandler {
             _shutdown: shutdown,
             handle: Some(handle),

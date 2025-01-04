@@ -4,11 +4,11 @@
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
-use std::io::Error;
-use std::sync::Mutex;
-use log::{error, info, debug};
-use std::io::ErrorKind;
 use libc::intptr_t;
+use log::{debug, error, info};
+use std::io::Error;
+use std::io::ErrorKind;
+use std::sync::Mutex;
 
 #[derive(Debug)]
 struct CBMDevice {
@@ -24,10 +24,11 @@ pub enum CBMError {
 impl From<std::io::Error> for CBMError {
     fn from(error: std::io::Error) -> Self {
         match error.raw_os_error() {
-            Some(25) => CBMError::ConnectionError(
-                format!("Cannot access the XUM1541 - is it plugged in? Error: {}", error)
-            ),
-            _ => CBMError::Other(error.to_string())
+            Some(25) => CBMError::ConnectionError(format!(
+                "Cannot access the XUM1541 - is it plugged in? Error: {}",
+                error
+            )),
+            _ => CBMError::Other(error.to_string()),
         }
     }
 }
@@ -36,7 +37,7 @@ impl std::fmt::Display for CBMError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             CBMError::ConnectionError(msg) => write!(f, "{}", msg),
-            CBMError::Other(e) => write!(f, "{}", e)
+            CBMError::Other(e) => write!(f, "{}", e),
         }
     }
 }
@@ -46,9 +47,8 @@ pub type CBMDeviceResult<T> = std::result::Result<T, CBMError>;
 /// Macro to wrap cbm_ calls in order to retry up to once if a timeout is hit
 macro_rules! opencbm_retry {
     ($call:expr, $debug_name:expr) => {{
-        let mut final_result: Result<(), CBMError> = Err(CBMError::from(
-            Error::new(ErrorKind::Other, "Unreachable")
-        ));
+        let mut final_result: Result<(), CBMError> =
+            Err(CBMError::from(Error::new(ErrorKind::Other, "Unreachable")));
         for attempt in 1..=2 {
             debug!("Calling: {} (attempt {})", $debug_name, attempt);
             let result = unsafe { $call };
@@ -89,7 +89,7 @@ impl CBMDevice {
             error!("Invalid handle value: {:#x}", self.handle);
             return Err(Error::new(ErrorKind::InvalidInput, "Invalid handle value").into());
         }
-    
+
         opencbm_retry!(cbm_reset(self.handle), "cbm_reset")
     }
 
@@ -107,7 +107,7 @@ impl Drop for CBMDevice {
 }
 
 /// Wrapper for OpenCBM library integration
-/// 
+///
 /// Provides safe access to OpenCBM operations and ensures proper
 /// synchronization when accessing the hardware bus.
 #[derive(Debug)]
@@ -127,19 +127,21 @@ impl OpenCbm {
         })
     }
 
-
     pub fn send_command(&self, _device: u8, _command: &str) -> OpenCbmResult<()> {
-        let _cbm = self.handle.lock()
+        let _cbm = self
+            .handle
+            .lock()
             .map_err(|_| "Failed to acquire OpenCBM lock".to_string())?;
         // Implementation here
         Ok(())
     }
 
     pub fn reset_bus(&self) -> OpenCbmResult<()> {
-        let _cbm = self.handle.lock()
+        let _cbm = self
+            .handle
+            .lock()
             .map_err(|_| "Failed to acquire OpenCBM lock".to_string())?;
         // Implementation here
         Ok(())
     }
 }
-

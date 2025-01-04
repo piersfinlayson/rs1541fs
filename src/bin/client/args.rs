@@ -26,6 +26,10 @@ pub struct Args {
     #[arg(short = 'b', long = "bus-reset", action = ArgAction::SetTrue)]
     bus_reset: bool,
 
+    #[arg(short = 'k', long = "kill", action = ArgAction::SetTrue)]
+    /// Kill the server
+    kill: bool,
+
     /// Mount the filesystem (requires MOUNTPOINT)
     #[arg(short = 'm', long = "mount", group = "operation")]
     mount: bool,
@@ -50,6 +54,7 @@ pub struct ValidatedArgs {
     pub bus_reset: bool,
     pub mount: bool,
     pub unmount: bool,
+    pub kill: bool,
     pub mountpoint: Option<PathBuf>,
     pub mountpoint_str: Option<String>,
 }
@@ -65,6 +70,8 @@ impl ValidatedArgs {
             debug!("  Bus reset enabled: {}", self.bus_reset);
         } else if self.bus_reset {
             debug!("  Operation: bus-reset");
+        } else if self.kill {
+            debug!("  Operatoin: kill");
         }
         if self.device.is_some() {
             debug!("  Device num: {}", self.device.unwrap())
@@ -90,10 +97,23 @@ impl ValidatedArgs {
 impl Args {
     pub fn validate(self) -> Result<ValidatedArgs, String> {
         // Check that at least one operation is specified
-        if !self.mount && !self.unmount && !self.bus_reset {
+        if !self.mount && !self.unmount && !self.bus_reset && !self.kill {
             return Err(
-                "No operation specified. Use --mount, --unmount, or --bus-reset".to_string(),
+                "No operation specified. Use --mount, --unmount, --bus-reset or --kill".to_string(),
             );
+        }
+
+        // Nothing is allowed with kill
+        if self.kill {
+            if self.unmount
+                || self.bus_reset
+                || self.mount
+                || self.dummy_formats
+                || self.device.is_some()
+                || self.mountpoint.is_some()
+            {
+                return Err("No other options allowed with --kill".to_string());
+            }
         }
 
         // -f is not allowed with unmount or bus_reset on its own
@@ -156,6 +176,7 @@ impl Args {
             unmount: self.unmount,
             mountpoint: mountpoint,
             mountpoint_str: mountpoint_str,
+            kill: self.kill,
         })
     }
 }
@@ -215,6 +236,7 @@ fn test_default_device_number() {
         unmount: false,
         mountpoint: Some(mount_path),
         help: None,
+        kill: kill,
     };
 
     let validated = validate_for_test(args).unwrap();
@@ -235,6 +257,7 @@ fn test_valid_device_numbers() {
             unmount: false,
             mountpoint: Some(mount_path.clone()),
             help: None,
+            kill: kill,
         };
 
         let validated = validate_for_test(args).unwrap();
@@ -256,6 +279,7 @@ fn test_invalid_device_numbers() {
         unmount: false,
         mountpoint: Some(mount_path.clone()),
         help: None,
+        kill: kill,
     };
     assert!(validate_for_test(args).is_err());
 
@@ -268,6 +292,7 @@ fn test_invalid_device_numbers() {
         unmount: false,
         mountpoint: Some(mount_path),
         help: None,
+        kill: kill,
     };
     assert!(validate_for_test(args).is_err());
 }
@@ -285,6 +310,7 @@ fn test_mount_unmount_exclusivity() {
         unmount: true,
         mountpoint: Some(mount_path),
         help: None,
+        kill: kill,
     };
 
     let result = validate_for_test(args);
@@ -305,6 +331,7 @@ fn test_mountpoint_required_for_mount() {
         unmount: false,
         mountpoint: None,
         help: None,
+        kill: kill,
     };
 
     let result = validate_for_test(args);
@@ -322,6 +349,7 @@ fn test_mountpoint_required_for_unmount() {
         unmount: true,
         mountpoint: None,
         help: None,
+        kill: kill,
     };
 
     let result = validate_for_test(args);
@@ -342,6 +370,7 @@ fn test_only_device_num_or_mountpoint_required_for_unmount() {
         unmount: true,
         mountpoint: Some(mount_path.clone()),
         help: None,
+        kill: kill,
     };
 
     let result = validate_for_test(args);
@@ -362,6 +391,7 @@ fn test_only_device_num_unmount() {
         unmount: true,
         mountpoint: None,
         help: None,
+        kill: kill,
     };
 
     assert!(!validate_for_test(args).is_err());
@@ -380,6 +410,7 @@ fn test_only_mountpoint_unmount() {
         unmount: true,
         mountpoint: Some(mount_path.clone()),
         help: None,
+        kill: kill,
     };
 
     assert!(!validate_for_test(args).is_err());
@@ -395,6 +426,7 @@ fn test_bus_reset_restrictions_device_none() {
         unmount: false,
         mountpoint: None,
         help: None,
+        kill: kill,
     };
 
     let result = validate_for_test(args);
@@ -412,6 +444,7 @@ fn test_bus_reset_restrictions_with_device() {
         unmount: false,
         mountpoint: None,
         help: None,
+        kill: kill,
     };
 
     let result = validate_for_test(args);
@@ -434,6 +467,7 @@ fn test_valid_mountpoint() {
         unmount: false,
         mountpoint: Some(mount_path.clone()),
         help: None,
+        kill: kill,
     };
 
     let validated = validate_for_test(args).unwrap();
@@ -454,6 +488,7 @@ fn test_mountpoint_string_conversion() {
         unmount: false,
         mountpoint: Some(mount_path),
         help: None,
+        kill: kill,
     };
 
     let validated = validate_for_test(args).unwrap();
@@ -473,6 +508,7 @@ fn test_dummy_formats_flag() {
         unmount: false,
         mountpoint: Some(mount_path),
         help: None,
+        kill: kill,
     };
 
     let validated = validate_for_test(args).unwrap();
@@ -489,6 +525,7 @@ fn test_no_operation_specified() {
         unmount: false,
         mountpoint: None,
         help: None,
+        kill: kill,
     };
 
     let result = validate_for_test(args);
@@ -510,6 +547,7 @@ fn test_nonexistent_mountpoint() {
         unmount: false,
         mountpoint: Some(PathBuf::from("/this/path/does/not/exist")),
         help: None,
+        kill: kill,
     };
 
     let result = validate_for_test(args);
@@ -541,6 +579,7 @@ fn test_non_writable_mountpoint() {
         unmount: false,
         mountpoint: Some(mount_path.clone()),
         help: None,
+        kill: kill,
     };
 
     let result = validate_for_test(args);

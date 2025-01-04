@@ -19,6 +19,7 @@ pub enum Request {
     },
     BusReset,
     Ping,
+    Die,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -28,4 +29,5 @@ pub enum Response {
     BusResetSuccess,
     Error(String),
     Pong,
+    Dying,
 }

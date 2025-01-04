@@ -6,12 +6,12 @@ use rs1541fs::logging::init_logging;
 use rs1541fs::opencbm::OpenCbm;
 
 use daemonize::Daemonize;
-use log::{error, info, debug};
+use log::{debug, error, info};
+use scopeguard::defer;
 use signal::{create_signal_handler, get_pid_filename};
 use std::fs;
-use std::path::Path;
-use scopeguard::defer;
 use std::panic;
+use std::path::Path;
 
 fn check_pid_file() -> Result<(), std::io::Error> {
     let pid_file = get_pid_filename();
@@ -48,7 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .working_directory("/tmp");
 
     match daemonize.start() {
-        Ok(_) => {},
+        Ok(_) => {}
         Err(e) => {
             eprintln!("Failed to dameonize, {}", e);
             return Err(Box::new(e));
@@ -97,10 +97,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     debug!("IPC server exited");
 
     // Explicitly drop CBM so the driver is closed at this point
-    debug!("Close XUM1541 device"); 
+    debug!("Close XUM1541 device");
     drop(cbm);
 
     // Exit from main()
-    info!("Exiting"); 
+    info!("Exiting");
     Ok(())
 }

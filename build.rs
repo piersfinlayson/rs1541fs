@@ -4,7 +4,7 @@ use std::path::PathBuf;
 fn main() {
     // Link against opencbm
     println!("cargo:rustc-link-lib=opencbm");
-    
+
     // Regenerate bindings if the wrapper changes
     println!("cargo:rerun-if-changed=wrapper.h");
 

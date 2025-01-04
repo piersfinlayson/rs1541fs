@@ -6,9 +6,9 @@ use log::{debug, error, info};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 fn handle_client_request(stream: &mut UnixStream) -> Result<()> {
     // Set read timeout to prevent hanging
@@ -41,6 +41,7 @@ fn handle_client_request(stream: &mut UnixStream) -> Result<()> {
         Request::Unmount { mountpoint, device } => handle_unmount(mountpoint, device),
         Request::BusReset => handle_bus_reset(),
         Request::Ping => handle_ping(),
+        Request::Die => handle_die(),
     };
 
     match send_response(stream, response) {
@@ -163,6 +164,12 @@ fn handle_ping() -> Response {
     Response::Pong
 }
 
+fn handle_die() -> Response {
+    info!("Request: Die");
+    stop_server();
+    Response::Dying
+}
+
 fn send_response(stream: &mut UnixStream, response: Response) -> Result<()> {
     // Write directly to the stream without buffering
     serde_json::to_writer(&mut *stream, &response)
@@ -200,14 +207,13 @@ fn setup_socket() -> Result<UnixListener> {
     UnixListener::bind(SOCKET_PATH).map_err(|e| anyhow!("Failed to create socket: {}", e))
 }
 
-
 pub fn run_server() -> Result<()> {
     let listener = setup_socket()?;
-    
+
     // Set socket timeout to 1 second
     listener.set_nonblocking(true)?;
     RUNNING.store(true, Ordering::SeqCst);
-    
+
     info!("Server ready to accept connections");
     while RUNNING.load(Ordering::SeqCst) {
         match listener.accept() {
