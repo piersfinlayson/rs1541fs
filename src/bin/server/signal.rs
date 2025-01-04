@@ -1,4 +1,4 @@
-use crate::ipc::cleanup_socket;
+use crate::ipc::stop_server;
 use rs1541fs::ipc::DAEMON_PID_FILENAME;
 
 use lazy_static::lazy_static;
@@ -41,25 +41,30 @@ impl SignalHandler {
         // Spawn thread without storing handle - OS will clean it up on process exit
         let handle = std::thread::spawn(move || {
             for signal in signals.forever() {
-                info!("Signal {} caught - force unmounting", signal);
+                info!("Signal {} caught - handling", signal);
 
                 //let _ = Command::new("fusermount")
                 //    .args(["-u", "-z", &mountpoint])
                 //    .status();
-                cleanup_socket();
+                debug!("Close IPC socket");
+                stop_server();
 
                 shutdown_clone.store(true, Ordering::SeqCst);
 
                 // This may be extraneous - as main() should exit graceefully
                 // and remove the pidfile
                 if Path::new(&get_pid_filename()).exists() {
-                    info!("Signal {} caught - removing pidfile", signal);
+                    debug!("Removing pidfile");
                     fs::remove_file(get_pid_filename()).unwrap();
                 }
-                // Break after handling first signal
-                break;
+
+                // Break after handling signal - this causes no more signals
+                // to be handled
+                debug!("Signal handler completed");
+                //break;
             }
         });
+
 
         Ok(SignalHandler {
             _shutdown: shutdown,

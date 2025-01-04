@@ -6,11 +6,12 @@ use rs1541fs::logging::init_logging;
 use rs1541fs::opencbm::OpenCbm;
 
 use daemonize::Daemonize;
-use log::{error, info};
+use log::{error, info, debug};
 use signal::{create_signal_handler, get_pid_filename};
 use std::fs;
 use std::path::Path;
 use scopeguard::defer;
+use std::panic;
 
 fn check_pid_file() -> Result<(), std::io::Error> {
     let pid_file = get_pid_filename();
@@ -47,18 +48,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .working_directory("/tmp");
 
     match daemonize.start() {
-        Ok(_) => {
-            // Initialize logger
-            // We re-do this after daemonizing so the PID used in syslog is the PID
-            // of the daemon
-            init_logging(true, env!("CARGO_BIN_NAME").into());
-            info!("Daemonized at pid {}", std::process::id());
-        },
+        Ok(_) => {},
         Err(e) => {
             eprintln!("Failed to dameonize, {}", e);
             return Err(Box::new(e));
         }
     }
+
+    // Initialize logger
+    // We re-do this after daemonizing so the PID used in syslog is the PID
+    // of the daemon
+    init_logging(true, env!("CARGO_BIN_NAME").into());
+    info!("Daemonized at pid {}", std::process::id());
+
+    panic::set_hook(Box::new(|panic_info| {
+        if let Some(location) = panic_info.location() {
+            error!("Panic occurred at {}:{}", location.file(), location.line());
+        }
+        error!("Panic info: {}", panic_info);
+    }));
 
     // Set up deferred cleanup
     defer! {
@@ -84,11 +92,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     // Start the server and loop forever listening for mount/unmount requests
+    debug!("Start IPC server");
     run_server()?;
+    debug!("IPC server exited");
 
     // Explicitly drop CBM so the driver is closed at this point
+    debug!("Close XUM1541 device"); 
     drop(cbm);
 
     // Exit from main()
+    info!("Exiting"); 
     Ok(())
 }

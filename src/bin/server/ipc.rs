@@ -8,6 +8,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::thread;
 use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 fn handle_client_request(stream: &mut UnixStream) -> Result<()> {
     // Set read timeout to prevent hanging
@@ -174,8 +175,15 @@ fn send_response(stream: &mut UnixStream, response: Response) -> Result<()> {
     Ok(())
 }
 
+static RUNNING: AtomicBool = AtomicBool::new(true);
+
+pub fn stop_server() {
+    RUNNING.store(false, Ordering::SeqCst);
+}
+
 /// Function to cleanup the server socket - called from the signal handler
-pub fn cleanup_socket() {
+fn cleanup_socket() {
+    RUNNING.store(false, Ordering::SeqCst); // belt and braces
     if Path::new(SOCKET_PATH).exists() {
         if let Err(e) = std::fs::remove_file(SOCKET_PATH) {
             error!("Failed to remove socket during cleanup: {}", e);
@@ -192,22 +200,29 @@ fn setup_socket() -> Result<UnixListener> {
     UnixListener::bind(SOCKET_PATH).map_err(|e| anyhow!("Failed to create socket: {}", e))
 }
 
+
 pub fn run_server() -> Result<()> {
     let listener = setup_socket()?;
-
-    // Main server loop
+    
+    // Set socket timeout to 1 second
+    listener.set_nonblocking(true)?;
+    RUNNING.store(true, Ordering::SeqCst);
+    
     info!("Server ready to accept connections");
-    for stream in listener.incoming() {
-        match stream {
-            Ok(mut stream) => {
+    while RUNNING.load(Ordering::SeqCst) {
+        match listener.accept() {
+            Ok((mut stream, _addr)) => {
                 debug!("Accepted new connection");
-
-                // Handle each client in a separate thread
                 thread::spawn(move || {
                     if let Err(e) = handle_client_request(&mut stream) {
                         error!("Error handling client request: {}", e);
                     }
                 });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // No connection available, sleep briefly then continue
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
             }
             Err(e) => {
                 error!("Error accepting connection: {}", e);
@@ -215,8 +230,7 @@ pub fn run_server() -> Result<()> {
         }
     }
 
-    // We'll only get here if the incoming iterator ends
-    error!("Server accept loop terminated unexpectedly");
+    info!("Server accept loop terminated");
     cleanup_socket();
     Ok(())
 }

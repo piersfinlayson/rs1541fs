@@ -6,11 +6,13 @@ include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
 use std::io::Error;
 use std::sync::Mutex;
-use log::info;
+use log::{error, info, debug};
+use std::io::ErrorKind;
+use libc::intptr_t;
 
 #[derive(Debug)]
 struct CBMDevice {
-    handle: isize,
+    handle: intptr_t,
 }
 
 #[derive(Debug)]
@@ -34,38 +36,67 @@ impl std::fmt::Display for CBMError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             CBMError::ConnectionError(msg) => write!(f, "{}", msg),
-            CBMError::Other(e) => write!(f, "Unknown OpenCBM error: {}", e)
+            CBMError::Other(e) => write!(f, "{}", e)
         }
     }
 }
 
 pub type CBMDeviceResult<T> = std::result::Result<T, CBMError>;
 
-impl CBMDevice {
-    pub fn open() -> CBMDeviceResult<Self> {
-        let handle: *mut isize = std::ptr::null_mut();
-        let adapter: *mut i8 = std::ptr::null_mut();
-        let result = unsafe { cbm_driver_open_ex(handle, adapter) };
-        
-        if result == 0 {
-            let handle_val = unsafe { *handle };
-            Ok(CBMDevice { handle: handle_val })
-        } else {
-            Err(Error::last_os_error().into())
+/// Macro to wrap cbm_ calls in order to retry up to once if a timeout is hit
+macro_rules! opencbm_retry {
+    ($call:expr, $debug_name:expr) => {{
+        let mut final_result: Result<(), CBMError> = Err(CBMError::from(
+            Error::new(ErrorKind::Other, "Unreachable")
+        ));
+        for attempt in 1..=2 {
+            debug!("Calling: {} (attempt {})", $debug_name, attempt);
+            let result = unsafe { $call };
+            debug!("Returned: {} {} (attempt {})", $debug_name, result, attempt);
+
+            if result == 0 {
+                final_result = Ok(());
+                break;
+            }
+
+            if attempt == 1 && Error::last_os_error().raw_os_error() == Some(libc::ETIMEDOUT) {
+                info!("Received ETIMEDOUT from {} - trying again...", $debug_name);
+                continue;
+            }
+
+            let err = Error::last_os_error();
+            error!("{} failed with error: {:?}", $debug_name, err);
+            final_result = Err(CBMError::from(err));
+            break;
         }
+        final_result
+    }};
+}
+
+impl CBMDevice {
+    pub fn open() -> CBMDeviceResult<CBMDevice> {
+        let mut handle: intptr_t = 0;
+        let adapter: *mut i8 = std::ptr::null_mut();
+        opencbm_retry!(
+            cbm_driver_open_ex(&mut handle as *mut intptr_t, adapter),
+            "cbm_driver_open_ex"
+        )?;
+        Ok(CBMDevice { handle })
     }
 
     pub fn reset(&self) -> CBMDeviceResult<()> {
-        let result = unsafe { cbm_reset(self.handle) };
-        if result == 0 {
-            Ok(())
-        } else {
-            Err(Error::last_os_error().into())
+        if self.handle <= 0 || self.handle > isize::MAX as isize {
+            error!("Invalid handle value: {:#x}", self.handle);
+            return Err(Error::new(ErrorKind::InvalidInput, "Invalid handle value").into());
         }
+    
+        opencbm_retry!(cbm_reset(self.handle), "cbm_reset")
     }
 
     pub fn close(&self) {
+        debug!("Calling: cbm_driver_close");
         unsafe { cbm_driver_close(self.handle) };
+        debug!("Returned: cbm_driver_close");
     }
 }
 

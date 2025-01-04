@@ -12,8 +12,8 @@ rs1541fs relies on OpenCBM.  You must build and install it - you van do so like 
 sudo apt-get install build-essential libusb-dev cc65 linux-headers-$(uname -r)
 git clone https://github.com/OpenCBM/OpenCBM
 cd OpemCBM
-make -f LINUX/Makefile
-sudo make -f LINUX/Makefile install
+make -f LINUX/Makefile plugin
+sudo make -f LINUX/Makefile install install-plugin
 sudo adduser $USER opencbm
 ```
 
