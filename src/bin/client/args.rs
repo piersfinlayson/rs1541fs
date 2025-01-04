@@ -1,5 +1,4 @@
-use rs1541fs::validate::validate_mountpoint;
-use rs1541fs::{DEFAULT_DEVICE_NUM, MAX_DEVICE_NUM, MIN_DEVICE_NUM};
+use rs1541fs::validate::{validate_device, validate_mountpoint, DeviceValidation};
 
 use clap::{ArgAction, Parser};
 use log::debug;
@@ -71,10 +70,16 @@ impl ValidatedArgs {
             debug!("  Device num: {}", self.device.unwrap())
         }
         if self.mountpoint.is_some() {
-            debug!("  Mountpoint: {}", self.mountpoint.clone().unwrap().display());
+            debug!(
+                "  Mountpoint: {}",
+                self.mountpoint.clone().unwrap().display()
+            );
         }
         if self.mountpoint_str.is_some() {
-            debug!("  Mountpoint string: {}", self.mountpoint_str.clone().unwrap());
+            debug!(
+                "  Mountpoint string: {}",
+                self.mountpoint_str.clone().unwrap()
+            );
         }
         debug!("  Dummy formats enabled: {}", self.dummy_formats);
     }
@@ -86,7 +91,9 @@ impl Args {
     pub fn validate(self) -> Result<ValidatedArgs, String> {
         // Check that at least one operation is specified
         if !self.mount && !self.unmount && !self.bus_reset {
-            return Err("No operation specified. Use --mount, --unmount, or --bus-reset".to_string());
+            return Err(
+                "No operation specified. Use --mount, --unmount, or --bus-reset".to_string(),
+            );
         }
 
         // -f is not allowed with unmount or bus_reset on its own
@@ -102,7 +109,7 @@ impl Args {
                 return Err("--device is only valid on mounts and unmounts".to_string());
             }
         }
-        
+
         // Verify we don't have both of mount/unmount when specified
         if self.mount && self.unmount {
             return Err("Cannot perform both mount and unmount simultaneously".to_string());
@@ -110,23 +117,9 @@ impl Args {
 
         // Check device num is valid, and set to default if required
         let device_num = if self.mount {
-            let nm = self.device.unwrap_or(DEFAULT_DEVICE_NUM);
-            if nm < MIN_DEVICE_NUM || nm > MAX_DEVICE_NUM {
-                return Err(format!(
-                    "Device num must be between {} and {}",
-                    MIN_DEVICE_NUM, MAX_DEVICE_NUM
-                ));
-            }
-            Some(nm)
+            validate_device(self.device, DeviceValidation::Default)?
         } else if self.unmount && self.device.is_some() {
-            let nm = self.device.unwrap();
-            if nm < MIN_DEVICE_NUM || nm > MAX_DEVICE_NUM {
-                return Err(format!(
-                    "Device num must be between {} and {}",
-                    MIN_DEVICE_NUM, MAX_DEVICE_NUM
-                ));
-            }
-            Some(nm)
+            validate_device(self.device, DeviceValidation::Optional)?
         } else {
             None
         };
@@ -170,6 +163,7 @@ impl Args {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rs1541fs::{DEFAULT_DEVICE_NUM, MAX_DEVICE_NUM, MIN_DEVICE_NUM};
     use std::path::PathBuf;
     use tempfile::TempDir;
 
@@ -288,7 +282,7 @@ mod tests {
             mountpoint: Some(mount_path),
             help: None,
         };
-        
+
         let result = validate_for_test(args);
         assert!(result.is_err());
         assert_eq!(
@@ -308,7 +302,7 @@ mod tests {
             mountpoint: None,
             help: None,
         };
-        
+
         let result = validate_for_test(args);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "No mountpoint specified");
@@ -325,7 +319,7 @@ mod tests {
             mountpoint: None,
             help: None,
         };
-        
+
         let result = validate_for_test(args);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "No mountpoint specified");
@@ -345,10 +339,13 @@ mod tests {
             mountpoint: Some(mount_path.clone()),
             help: None,
         };
-        
+
         let result = validate_for_test(args);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Only specify either --device or mountpoint on unmount");
+        assert_eq!(
+            result.unwrap_err(),
+            "Only specify either --device or mountpoint on unmount"
+        );
     }
 
     #[test]
@@ -362,7 +359,7 @@ mod tests {
             mountpoint: None,
             help: None,
         };
-        
+
         assert!(!validate_for_test(args).is_err());
     }
 
@@ -380,7 +377,7 @@ mod tests {
             mountpoint: Some(mount_path.clone()),
             help: None,
         };
-        
+
         assert!(!validate_for_test(args).is_err());
     }
 
@@ -395,7 +392,7 @@ mod tests {
             mountpoint: None,
             help: None,
         };
-        
+
         let result = validate_for_test(args);
         let err = result.unwrap_err();
         assert!(err.0.contains("--dummy-formats is only valid on mounts"));
@@ -412,10 +409,12 @@ mod tests {
             mountpoint: None,
             help: None,
         };
-        
+
         let result = validate_for_test(args);
         let err = result.unwrap_err();
-        assert!(err.0.contains("--device is only valid on mounts and unmounts"));
+        assert!(err
+            .0
+            .contains("--device is only valid on mounts and unmounts"));
     }
 
     #[test]
@@ -491,7 +490,10 @@ mod tests {
         let result = validate_for_test(args);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.0, "No operation specified. Use --mount, --unmount, or --bus-reset");
+        assert_eq!(
+            err.0,
+            "No operation specified. Use --mount, --unmount, or --bus-reset"
+        );
     }
 
     #[test]
@@ -509,7 +511,9 @@ mod tests {
         let result = validate_for_test(args);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.0.contains("Mountpoint /this/path/does/not/exist is not a directory"));
+        assert!(err
+            .0
+            .contains("Mountpoint /this/path/does/not/exist is not a directory"));
     }
 
     #[test]

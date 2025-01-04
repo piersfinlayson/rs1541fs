@@ -1,10 +1,10 @@
 mod args;
 
 use args::{Args, ValidatedArgs};
+#[cfg(not(test))]
+use rs1541fs::ipc::SOCKET_PATH;
 use rs1541fs::ipc::{Request, Response};
 use rs1541fs::ipc::{DAEMON_PID_FILENAME, DAEMON_PNAME};
-#[cfg(not(test))]
-use rs1541fs::ipc::{SOCKET_PATH};
 use rs1541fs::logging::init_logging;
 
 use anyhow::{anyhow, Context, Result};
@@ -14,12 +14,12 @@ use std::env;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
-#[cfg(test)]
-use std::sync::Mutex;
 #[cfg(test)]
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
+#[cfg(test)]
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 #[cfg(not(test))]
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -72,10 +72,9 @@ fn verify_daemon_process(pid_file: &Path) -> Result<(), ClientError> {
         if let Ok(proc_cmdline) = read_proc_cmdline(pid) {
             let cmdline_parts: Vec<&str> = proc_cmdline.split('\0').collect();
             if let Some(process_name) = cmdline_parts.first() {
-                if Path::new(process_name)
-                    .file_name()
-                    .and_then(|n| n.to_str()) 
-                    == Some(DAEMON_PNAME) {
+                if Path::new(process_name).file_name().and_then(|n| n.to_str())
+                    == Some(DAEMON_PNAME)
+                {
                     return Ok(());
                 }
             }
@@ -115,7 +114,7 @@ fn ensure_daemon_running() -> Result<(), ClientError> {
         .join(DAEMON_PNAME)
         .to_string_lossy()
         .into_owned();
-        
+
     debug!("Using the following daemon command: {}", daemon_path);
     Command::new(daemon_path.clone())
         .stdin(Stdio::null())
@@ -132,7 +131,7 @@ fn ensure_daemon_running() -> Result<(), ClientError> {
     while start_time.elapsed() < STARTUP_TIMEOUT {
         let health_check = check_daemon_health();
         let process_check = verify_daemon_process(Path::new(DAEMON_PID_FILENAME));
-        
+
         match (health_check, process_check) {
             (Ok(_), Ok(_)) => {
                 info!("Successfully started daemon");
@@ -148,7 +147,7 @@ fn ensure_daemon_running() -> Result<(), ClientError> {
                 debug!("Health: {}, process: {}", e1, e2);
             }
         }
-        
+
         std::thread::sleep(CONNECT_RETRY_DELAY);
     }
 
@@ -159,11 +158,13 @@ fn ensure_daemon_running() -> Result<(), ClientError> {
 fn send_request(request: Request) -> Result<Response, ClientError> {
     let mut stream = UnixStream::connect(get_socket_path())
         .map_err(|e| ClientError::IPC(format!("Failed to connect to daemon: {}", e)))?;
-    
+
     // Set timeouts
-    stream.set_read_timeout(Some(OPERATION_TIMEOUT))
+    stream
+        .set_read_timeout(Some(OPERATION_TIMEOUT))
         .map_err(|e| ClientError::IPC(e.to_string()))?;
-    stream.set_write_timeout(Some(OPERATION_TIMEOUT))
+    stream
+        .set_write_timeout(Some(OPERATION_TIMEOUT))
         .map_err(|e| ClientError::IPC(e.to_string()))?;
 
     // Write request
@@ -171,21 +172,23 @@ fn send_request(request: Request) -> Result<Response, ClientError> {
         .map_err(|e| ClientError::Protocol(format!("Failed to serialize request: {}", e)))?;
     writeln!(&mut stream)
         .map_err(|e| ClientError::IPC(format!("Failed to write newline: {}", e)))?;
-    stream.flush()
+    stream
+        .flush()
         .map_err(|e| ClientError::IPC(format!("Failed to flush request: {}", e)))?;
 
     // Read response
     let mut response_data = String::new();
     let mut buf = [0u8; 4096];
-    
+
     loop {
         match stream.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
                 if response_data.len() + n > MAX_RESPONSE_SIZE {
-                    return Err(ClientError::Protocol(
-                        format!("Response exceeded maximum size of {} bytes", MAX_RESPONSE_SIZE)
-                    ));
+                    return Err(ClientError::Protocol(format!(
+                        "Response exceeded maximum size of {} bytes",
+                        MAX_RESPONSE_SIZE
+                    )));
                 }
                 response_data.push_str(&String::from_utf8_lossy(&buf[..n]));
             }
@@ -244,8 +247,15 @@ fn main() -> Result<()> {
     // Store off some stuff for later logging
     let request_logging = request.clone();
     let (mountpoint, device) = match request_logging {
-        Request::Mount{ mountpoint, device, .. } => (mountpoint, device.to_string()),
-        Request::Unmount{ mountpoint, device, .. } => (mountpoint.unwrap_or("".to_string()), device.map_or(String::new(), |n| n.to_string())),
+        Request::Mount {
+            mountpoint, device, ..
+        } => (mountpoint, device.to_string()),
+        Request::Unmount {
+            mountpoint, device, ..
+        } => (
+            mountpoint.unwrap_or("".to_string()),
+            device.map_or(String::new(), |n| n.to_string()),
+        ),
         _ => (String::new(), String::new()),
     };
 
@@ -256,11 +266,17 @@ fn main() -> Result<()> {
     match response {
         Response::Error(err) => Err(anyhow!("Operation failed: {}", err)),
         Response::MountSuccess => {
-            info!("Successfully instructed daemon to mount device {} at {}", device, mountpoint);
+            info!(
+                "Successfully instructed daemon to mount device {} at {}",
+                device, mountpoint
+            );
             Ok(())
         }
         Response::UnmountSuccess => {
-            info!("Successfully instructed daemon to unmount device {} or mountpoint {}", device, mountpoint);
+            info!(
+                "Successfully instructed daemon to unmount device {} or mountpoint {}",
+                device, mountpoint
+            );
             Ok(())
         }
         Response::BusResetAck => {
@@ -281,8 +297,12 @@ lazy_static::lazy_static! {
 
 #[cfg(test)]
 fn read_proc_cmdline(pid: u32) -> std::io::Result<String> {
-    if pid > 999999 {  // Assume very high PIDs are invalid
-        return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Process not found"));
+    if pid > 999999 {
+        // Assume very high PIDs are invalid
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Process not found",
+        ));
     }
     Ok(format!("{}\0args", DAEMON_PNAME))
 }
@@ -294,18 +314,22 @@ fn get_socket_path() -> &'static str {
 
 #[cfg(test)]
 fn get_socket_path() -> String {
-    TEST_SOCKET_PATH.lock().unwrap().to_string_lossy().into_owned()
+    TEST_SOCKET_PATH
+        .lock()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockall::mock;
+    use mockall::predicate::*;
     use std::io::Write;
     use std::os::unix::net::UnixListener;
-    use tempfile::tempdir;
     use std::thread;
-    use mockall::predicate::*;
-    use mockall::mock;
+    use tempfile::tempdir;
 
     // Mock UnixStream for testing IPC
     mock! {
@@ -329,12 +353,12 @@ mod tests {
     fn setup_mock_socket() -> (UnixListener, PathBuf) {
         let socket_dir = tempdir().unwrap();
         let socket_path = socket_dir.path().join("test.sock");
-        
+
         // Clean up existing socket if it exists
         if socket_path.exists() {
             let _ = std::fs::remove_file(&socket_path);
         }
-        
+
         *TEST_SOCKET_PATH.lock().unwrap() = socket_path.clone();
         let listener = UnixListener::bind(&socket_path).expect("Failed to bind socket");
         (listener, socket_path)
@@ -344,7 +368,7 @@ mod tests {
     fn test_verify_daemon_process_success() {
         let pid = std::process::id();
         let pid_file = create_pid_file(pid);
-        
+
         assert!(verify_daemon_process(pid_file.path()).is_ok());
     }
 
@@ -360,19 +384,16 @@ mod tests {
     #[test]
     fn test_send_request_timeout() {
         let (listener, socket_path) = setup_mock_socket();
-        
+
         thread::spawn(move || {
             let (_stream, _) = listener.accept().unwrap();
             thread::sleep(Duration::from_secs(OPERATION_TIMEOUT.as_secs() + 1));
         });
 
         std::env::set_var("SOCKET_PATH", socket_path.to_str().unwrap());
-        
+
         let request = Request::Ping;
-        assert!(matches!(
-            send_request(request),
-            Err(ClientError::IPC(_))
-        ));
+        assert!(matches!(send_request(request), Err(ClientError::IPC(_))));
     }
 
     #[test]
@@ -418,10 +439,7 @@ mod tests {
 
         let request = create_request(&args);
         match request {
-            Request::Unmount {
-                mountpoint,
-                device,
-            } => {
+            Request::Unmount { mountpoint, device } => {
                 assert_eq!(mountpoint, Some("/test/mount".to_string()));
                 assert_eq!(device, Some(8));
             }
@@ -450,12 +468,11 @@ mod tests {
         std::env::set_var("TEST_VAR", "test_value");
         let mut cmd = Command::new("test");
         cmd.env_if_exists("TEST_VAR");
-        
+
         // Get environment from Command
         let envs: Vec<_> = cmd.get_envs().collect();
         assert!(envs.iter().any(|(key, value)| {
             key.to_str().unwrap() == "TEST_VAR" && value.unwrap().to_str().unwrap() == "test_value"
         }));
     }
-
 }

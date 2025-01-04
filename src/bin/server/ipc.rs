@@ -42,7 +42,11 @@ fn handle_client_request(stream: &mut UnixStream) -> Result<()> {
             }
         },
         Request::Unmount { mountpoint, device } => {
-            info!("Unmount device {} or mountpoint {}", device.map_or(String::new(), |n| n.to_string()), mountpoint.unwrap_or(String::new()));
+            info!(
+                "Unmount device {} or mountpoint {}",
+                device.map_or(String::new(), |n| n.to_string()),
+                mountpoint.unwrap_or(String::new())
+            );
             Response::UnmountSuccess
         }
         Request::BusReset => {
