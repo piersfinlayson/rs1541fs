@@ -42,6 +42,9 @@ impl From<std::io::Error> for OpenCbmError {
             Some(0) => OpenCbmError::ConnectionError(format!(
                 "Cannot access the XUM1541 - is it plugged in?"
             )),
+            Some(19) => OpenCbmError::ConnectionError(format!(
+                "Cannot access the XUM1541 - is it plugged in?"
+            )),
             _ => OpenCbmError::Other(error.to_string()),
         }
     }
