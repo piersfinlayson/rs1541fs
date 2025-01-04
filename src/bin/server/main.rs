@@ -3,12 +3,14 @@ mod signal;
 
 use ipc::run_server;
 use rs1541fs::logging::init_logging;
+use rs1541fs::opencbm::OpenCbm;
 
 use daemonize::Daemonize;
-use log::{debug, error, info};
+use log::{error, info};
 use signal::{create_signal_handler, get_pid_filename};
 use std::fs;
 use std::path::Path;
+use scopeguard::defer;
 
 fn check_pid_file() -> Result<(), std::io::Error> {
     let pid_file = get_pid_filename();
@@ -31,6 +33,11 @@ fn check_pid_file() -> Result<(), std::io::Error> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Don't initialize logger yet, as we don't seem to be able to re-init
+    // later (with a new PID) without a panic
+    // init_logging(true, env!("CARGO_BIN_NAME").into());
+    // debug!("Logging initialized");
+
     // Daemonize - must do so before setting up our signal
     // handler.
     check_pid_file()?;
@@ -40,18 +47,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .working_directory("/tmp");
 
     match daemonize.start() {
-        Ok(_) => info!("Daemonized at pid {}", std::process::id()),
+        Ok(_) => {
+            // Initialize logger
+            // We re-do this after daemonizing so the PID used in syslog is the PID
+            // of the daemon
+            init_logging(true, env!("CARGO_BIN_NAME").into());
+            info!("Daemonized at pid {}", std::process::id());
+        },
         Err(e) => {
             eprintln!("Failed to dameonize, {}", e);
             return Err(Box::new(e));
         }
     }
 
-    // Initialize logger
-    // We do this after daemonizing so the PID used in syslog is the PID of
-    // the daemon
-    init_logging(true, env!("CARGO_BIN_NAME").into());
-    debug!("Logging initialized");
+    // Set up deferred cleanup
+    defer! {
+        if Path::new(&get_pid_filename()).exists() {
+            info!("Removing pidfile");
+            let _ = fs::remove_file(get_pid_filename());
+        }
+    }
 
     // Set up signal handler as a lazy_static
     // We do this to ensure it is retained for the lifetime of the program
@@ -61,17 +76,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // has been created but not deleted.  Nothing we can do.
     create_signal_handler();
 
+    // Connect to OpenCBM and open the XUM1541 device
+    let cbm = OpenCbm::new().map_err(|e| -> Box<dyn std::error::Error> {
+        let error_string = format!("Failed to open XUM1541 device: {}", e);
+        error!("{}", error_string);
+        error_string.into()
+    })?;
+
     // Start the server and loop forever listening for mount/unmount requests
     run_server()?;
-    // Mount the mountpoint
-    // fuser::mount2 blocks until FUSE exits
-    //fuser::mount2(FS1541, config.mountpoint, &options).unwrap();
 
-    // Remove the PID file if it exists
-    if Path::new(&get_pid_filename()).exists() {
-        info!("Removing pidfile");
-        fs::remove_file(get_pid_filename())?;
-    }
+    // Explicitly drop CBM so the driver is closed at this point
+    drop(cbm);
 
     // Exit from main()
     Ok(())
