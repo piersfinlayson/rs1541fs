@@ -59,6 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // We re-do this after daemonizing so the PID used in syslog is the PID
     // of the daemon
     init_logging(true, env!("CARGO_BIN_NAME").into());
+    info!("----- Starting -----");
     info!("Daemonized at pid {}", std::process::id());
 
     panic::set_hook(Box::new(|panic_info| {
@@ -72,6 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     defer! {
         if Path::new(&get_pid_filename()).exists() {
             info!("Removing pidfile");
+            info!("----- Exiting -----");
             let _ = fs::remove_file(get_pid_filename());
         }
     }
@@ -101,6 +103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(cbm);
 
     // Exit from main()
-    info!("Exiting");
+    // Note that the deferred code will now run, as well as Rust dropping
+    // anything we didn't explicitly drop already 
     Ok(())
 }

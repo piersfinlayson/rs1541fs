@@ -203,7 +203,7 @@ fn setup_socket() -> Result<UnixListener> {
     cleanup_socket();
 
     // Create new socket
-    info!("Starting server on {}", SOCKET_PATH);
+    info!("Starting IPC server on {}", SOCKET_PATH);
     UnixListener::bind(SOCKET_PATH).map_err(|e| anyhow!("Failed to create socket: {}", e))
 }
 
@@ -214,11 +214,11 @@ pub fn run_server() -> Result<()> {
     listener.set_nonblocking(true)?;
     RUNNING.store(true, Ordering::SeqCst);
 
-    info!("Server ready to accept connections");
+    info!("IPC server ready to accept connections");
     while RUNNING.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((mut stream, _addr)) => {
-                debug!("Accepted new connection");
+                debug!("IPC server accepted new connection");
                 thread::spawn(move || {
                     if let Err(e) = handle_client_request(&mut stream) {
                         error!("Error handling client request: {}", e);
