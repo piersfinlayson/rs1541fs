@@ -161,269 +161,74 @@ impl Args {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use rs1541fs::{DEFAULT_DEVICE_NUM, MAX_DEVICE_NUM, MIN_DEVICE_NUM};
-    use std::path::PathBuf;
-    use tempfile::TempDir;
+use rs1541fs::{DEFAULT_DEVICE_NUM, MAX_DEVICE_NUM, MIN_DEVICE_NUM};
+#[cfg(test)]
+use tempfile::TempDir;
 
-    // Helper function to create a temporary directory for mount point tests
-    fn setup_test_dir() -> TempDir {
-        TempDir::new().expect("Failed to create temp directory")
+#[cfg(test)]
+// Helper function to create a temporary directory for mount point tests
+fn setup_test_dir() -> TempDir {
+    TempDir::new().expect("Failed to create temp directory")
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct TestError(String);
+
+#[cfg(test)]
+impl From<String> for TestError {
+    fn from(s: String) -> Self {
+        TestError(s)
     }
+}
 
-    #[derive(Debug)]
-    struct TestError(String);
-
-    impl From<String> for TestError {
-        fn from(s: String) -> Self {
-            TestError(s)
-        }
+#[cfg(test)]
+impl PartialEq<&str> for TestError {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
     }
+}
 
-    impl PartialEq<&str> for TestError {
-        fn eq(&self, other: &&str) -> bool {
-            self.0 == *other
-        }
+#[cfg(test)]
+impl std::fmt::Display for TestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
+}
 
-    impl std::fmt::Display for TestError {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "{}", self.0)
-        }
-    }
+#[cfg(test)]
+// Helper function to convert String errors to our TestError type
+fn validate_for_test(args: Args) -> Result<ValidatedArgs, TestError> {
+    args.validate().map_err(TestError)
+}
 
-    // Helper function to convert String errors to our TestError type
-    fn validate_for_test(args: Args) -> Result<ValidatedArgs, TestError> {
-        args.validate().map_err(TestError)
-    }
+#[test]
+fn test_default_device_number() {
+    let temp_dir = setup_test_dir();
+    let mount_path = temp_dir.path().to_path_buf();
 
-    #[test]
-    fn test_default_device_number() {
-        let temp_dir = setup_test_dir();
-        let mount_path = temp_dir.path().to_path_buf();
+    let args = Args {
+        device: None,
+        dummy_formats: false,
+        bus_reset: false,
+        mount: true,
+        unmount: false,
+        mountpoint: Some(mount_path),
+        help: None,
+    };
 
+    let validated = validate_for_test(args).unwrap();
+    assert_eq!(validated.device, Some(DEFAULT_DEVICE_NUM));
+}
+
+#[test]
+fn test_valid_device_numbers() {
+    let temp_dir = setup_test_dir();
+    let mount_path = temp_dir.path().to_path_buf();
+
+    for device in MIN_DEVICE_NUM..=MAX_DEVICE_NUM {
         let args = Args {
-            device: None,
-            dummy_formats: false,
-            bus_reset: false,
-            mount: true,
-            unmount: false,
-            mountpoint: Some(mount_path),
-            help: None,
-        };
-
-        let validated = validate_for_test(args).unwrap();
-        assert_eq!(validated.device, Some(DEFAULT_DEVICE_NUM));
-    }
-
-    #[test]
-    fn test_valid_device_numbers() {
-        let temp_dir = setup_test_dir();
-        let mount_path = temp_dir.path().to_path_buf();
-
-        for device in MIN_DEVICE_NUM..=MAX_DEVICE_NUM {
-            let args = Args {
-                device: Some(device),
-                dummy_formats: false,
-                bus_reset: false,
-                mount: true,
-                unmount: false,
-                mountpoint: Some(mount_path.clone()),
-                help: None,
-            };
-
-            let validated = validate_for_test(args).unwrap();
-            assert_eq!(validated.device, Some(device));
-        }
-    }
-
-    #[test]
-    fn test_invalid_device_numbers() {
-        let temp_dir = setup_test_dir();
-        let mount_path = temp_dir.path().to_path_buf();
-
-        // Test below minimum
-        let args = Args {
-            device: Some(MIN_DEVICE_NUM - 1),
-            dummy_formats: false,
-            bus_reset: false,
-            mount: true,
-            unmount: false,
-            mountpoint: Some(mount_path.clone()),
-            help: None,
-        };
-        assert!(validate_for_test(args).is_err());
-
-        // Test above maximum
-        let args = Args {
-            device: Some(MAX_DEVICE_NUM + 1),
-            dummy_formats: false,
-            bus_reset: false,
-            mount: true,
-            unmount: false,
-            mountpoint: Some(mount_path),
-            help: None,
-        };
-        assert!(validate_for_test(args).is_err());
-    }
-
-    #[test]
-    fn test_mount_unmount_exclusivity() {
-        let temp_dir = setup_test_dir();
-        let mount_path = temp_dir.path().to_path_buf();
-
-        let args = Args {
-            device: None,
-            dummy_formats: false,
-            bus_reset: false,
-            mount: true,
-            unmount: true,
-            mountpoint: Some(mount_path),
-            help: None,
-        };
-
-        let result = validate_for_test(args);
-        assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err(),
-            "Cannot perform both mount and unmount simultaneously"
-        );
-    }
-
-    #[test]
-    fn test_mountpoint_required_for_mount() {
-        let args = Args {
-            device: None,
-            dummy_formats: false,
-            bus_reset: false,
-            mount: true,
-            unmount: false,
-            mountpoint: None,
-            help: None,
-        };
-
-        let result = validate_for_test(args);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "No mountpoint specified");
-    }
-
-    #[test]
-    fn test_mountpoint_required_for_unmount() {
-        let args = Args {
-            device: None,
-            dummy_formats: false,
-            bus_reset: false,
-            mount: false,
-            unmount: true,
-            mountpoint: None,
-            help: None,
-        };
-
-        let result = validate_for_test(args);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "No mountpoint specified");
-    }
-
-    #[test]
-    fn test_only_device_num_or_mountpoint_required_for_unmount() {
-        let temp_dir = setup_test_dir();
-        let mount_path = temp_dir.path().to_path_buf();
-
-        let args = Args {
-            device: Some(DEFAULT_DEVICE_NUM),
-            dummy_formats: false,
-            bus_reset: false,
-            mount: false,
-            unmount: true,
-            mountpoint: Some(mount_path.clone()),
-            help: None,
-        };
-
-        let result = validate_for_test(args);
-        assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err(),
-            "Only specify either --device or mountpoint on unmount"
-        );
-    }
-
-    #[test]
-    fn test_only_device_num_unmount() {
-        let args = Args {
-            device: Some(DEFAULT_DEVICE_NUM),
-            dummy_formats: false,
-            bus_reset: false,
-            mount: false,
-            unmount: true,
-            mountpoint: None,
-            help: None,
-        };
-
-        assert!(!validate_for_test(args).is_err());
-    }
-
-    #[test]
-    fn test_only_mountpoint_unmount() {
-        let temp_dir = setup_test_dir();
-        let mount_path = temp_dir.path().to_path_buf();
-
-        let args = Args {
-            device: None,
-            dummy_formats: false,
-            bus_reset: false,
-            mount: false,
-            unmount: true,
-            mountpoint: Some(mount_path.clone()),
-            help: None,
-        };
-
-        assert!(!validate_for_test(args).is_err());
-    }
-
-    #[test]
-    fn test_bus_reset_restrictions_device_none() {
-        let args = Args {
-            device: None,
-            dummy_formats: true,
-            bus_reset: true,
-            mount: false,
-            unmount: false,
-            mountpoint: None,
-            help: None,
-        };
-
-        let result = validate_for_test(args);
-        let err = result.unwrap_err();
-        assert!(err.0.contains("--dummy-formats is only valid on mounts"));
-    }
-
-    #[test]
-    fn test_bus_reset_restrictions_with_device() {
-        let args = Args {
-            device: Some(DEFAULT_DEVICE_NUM),
-            dummy_formats: false,
-            bus_reset: true,
-            mount: false,
-            unmount: false,
-            mountpoint: None,
-            help: None,
-        };
-
-        let result = validate_for_test(args);
-        let err = result.unwrap_err();
-        assert!(err
-            .0
-            .contains("--device is only valid on mounts and unmounts"));
-    }
-
-    #[test]
-    fn test_valid_mountpoint() {
-        let temp_dir = setup_test_dir();
-        let mount_path = temp_dir.path().to_path_buf();
-
-        let args = Args {
-            device: None,
+            device: Some(device),
             dummy_formats: false,
             bus_reset: false,
             mount: true,
@@ -433,139 +238,337 @@ mod tests {
         };
 
         let validated = validate_for_test(args).unwrap();
-        assert_eq!(validated.mountpoint.unwrap(), mount_path);
+        assert_eq!(validated.device, Some(device));
     }
+}
 
-    #[test]
-    fn test_mountpoint_string_conversion() {
-        let temp_dir = setup_test_dir();
-        let mount_path = temp_dir.path().to_path_buf();
-        let mount_str = mount_path.to_str().unwrap().to_string();
+#[test]
+fn test_invalid_device_numbers() {
+    let temp_dir = setup_test_dir();
+    let mount_path = temp_dir.path().to_path_buf();
 
-        let args = Args {
-            device: None,
-            dummy_formats: false,
-            bus_reset: false,
-            mount: true,
-            unmount: false,
-            mountpoint: Some(mount_path),
-            help: None,
-        };
+    // Test below minimum
+    let args = Args {
+        device: Some(MIN_DEVICE_NUM - 1),
+        dummy_formats: false,
+        bus_reset: false,
+        mount: true,
+        unmount: false,
+        mountpoint: Some(mount_path.clone()),
+        help: None,
+    };
+    assert!(validate_for_test(args).is_err());
 
-        let validated = validate_for_test(args).unwrap();
-        assert_eq!(validated.mountpoint_str.unwrap(), mount_str);
-    }
+    // Test above maximum
+    let args = Args {
+        device: Some(MAX_DEVICE_NUM + 1),
+        dummy_formats: false,
+        bus_reset: false,
+        mount: true,
+        unmount: false,
+        mountpoint: Some(mount_path),
+        help: None,
+    };
+    assert!(validate_for_test(args).is_err());
+}
 
-    #[test]
-    fn test_dummy_formats_flag() {
-        let temp_dir = setup_test_dir();
-        let mount_path = temp_dir.path().to_path_buf();
+#[test]
+fn test_mount_unmount_exclusivity() {
+    let temp_dir = setup_test_dir();
+    let mount_path = temp_dir.path().to_path_buf();
 
-        let args = Args {
-            device: None,
-            dummy_formats: true,
-            bus_reset: false,
-            mount: true,
-            unmount: false,
-            mountpoint: Some(mount_path),
-            help: None,
-        };
+    let args = Args {
+        device: None,
+        dummy_formats: false,
+        bus_reset: false,
+        mount: true,
+        unmount: true,
+        mountpoint: Some(mount_path),
+        help: None,
+    };
 
-        let validated = validate_for_test(args).unwrap();
-        assert!(validated.dummy_formats);
-    }
+    let result = validate_for_test(args);
+    assert!(result.is_err());
+    assert_eq!(
+        result.unwrap_err(),
+        "Cannot perform both mount and unmount simultaneously"
+    );
+}
 
-    #[test]
-    fn test_no_operation_specified() {
-        let args = Args {
-            device: None,
-            dummy_formats: false,
-            bus_reset: false,
-            mount: false,
-            unmount: false,
-            mountpoint: None,
-            help: None,
-        };
+#[test]
+fn test_mountpoint_required_for_mount() {
+    let args = Args {
+        device: None,
+        dummy_formats: false,
+        bus_reset: false,
+        mount: true,
+        unmount: false,
+        mountpoint: None,
+        help: None,
+    };
 
-        let result = validate_for_test(args);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(
-            err.0,
-            "No operation specified. Use --mount, --unmount, or --bus-reset"
-        );
-    }
+    let result = validate_for_test(args);
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err(), "No mountpoint specified");
+}
 
-    #[test]
-    fn test_nonexistent_mountpoint() {
-        let args = Args {
-            device: None,
-            dummy_formats: false,
-            bus_reset: false,
-            mount: true,
-            unmount: false,
-            mountpoint: Some(PathBuf::from("/this/path/does/not/exist")),
-            help: None,
-        };
+#[test]
+fn test_mountpoint_required_for_unmount() {
+    let args = Args {
+        device: None,
+        dummy_formats: false,
+        bus_reset: false,
+        mount: false,
+        unmount: true,
+        mountpoint: None,
+        help: None,
+    };
 
-        let result = validate_for_test(args);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err
-            .0
-            .contains("Mountpoint /this/path/does/not/exist is not a directory"));
-    }
+    let result = validate_for_test(args);
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err(), "No mountpoint specified");
+}
 
-    #[test]
-    fn test_non_writable_mountpoint() {
-        use std::fs::{self, Permissions};
-        use std::os::unix::fs::PermissionsExt;
+#[test]
+fn test_only_device_num_or_mountpoint_required_for_unmount() {
+    let temp_dir = setup_test_dir();
+    let mount_path = temp_dir.path().to_path_buf();
 
-        // Create a temporary directory
-        let temp_dir = setup_test_dir();
-        let mount_path = temp_dir.path().to_path_buf();
+    let args = Args {
+        device: Some(DEFAULT_DEVICE_NUM),
+        dummy_formats: false,
+        bus_reset: false,
+        mount: false,
+        unmount: true,
+        mountpoint: Some(mount_path.clone()),
+        help: None,
+    };
 
-        // Remove write permissions
-        fs::set_permissions(&mount_path, Permissions::from_mode(0o444))
-            .expect("Failed to set permissions");
+    let result = validate_for_test(args);
+    assert!(result.is_err());
+    assert_eq!(
+        result.unwrap_err(),
+        "Only specify either --device or mountpoint on unmount"
+    );
+}
 
-        let args = Args {
-            device: None,
-            dummy_formats: false,
-            bus_reset: false,
-            mount: true,
-            unmount: false,
-            mountpoint: Some(mount_path.clone()),
-            help: None,
-        };
+#[test]
+fn test_only_device_num_unmount() {
+    let args = Args {
+        device: Some(DEFAULT_DEVICE_NUM),
+        dummy_formats: false,
+        bus_reset: false,
+        mount: false,
+        unmount: true,
+        mountpoint: None,
+        help: None,
+    };
 
-        let result = validate_for_test(args);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.0.contains("No write permission for mountpoint"));
+    assert!(!validate_for_test(args).is_err());
+}
 
-        // Restore write permissions for cleanup
-        fs::set_permissions(&mount_path, Permissions::from_mode(0o755))
-            .expect("Failed to restore permissions");
-    }
+#[test]
+fn test_only_mountpoint_unmount() {
+    let temp_dir = setup_test_dir();
+    let mount_path = temp_dir.path().to_path_buf();
 
-    #[test]
-    fn test_validated_args_log() {
-        let temp_dir = setup_test_dir();
-        let mount_path = temp_dir.path().to_path_buf();
-        let mount_str = mount_path.to_str().unwrap().to_string();
+    let args = Args {
+        device: None,
+        dummy_formats: false,
+        bus_reset: false,
+        mount: false,
+        unmount: true,
+        mountpoint: Some(mount_path.clone()),
+        help: None,
+    };
 
-        let validated = ValidatedArgs {
-            device: Some(DEFAULT_DEVICE_NUM),
-            dummy_formats: true,
-            bus_reset: true,
-            mount: true,
-            unmount: false,
-            mountpoint: Some(mount_path),
-            mountpoint_str: Some(mount_str),
-        };
+    assert!(!validate_for_test(args).is_err());
+}
 
-        // This test mainly ensures the log method doesn't panic
-        validated.log();
-    }
+#[test]
+fn test_bus_reset_restrictions_device_none() {
+    let args = Args {
+        device: None,
+        dummy_formats: true,
+        bus_reset: true,
+        mount: false,
+        unmount: false,
+        mountpoint: None,
+        help: None,
+    };
+
+    let result = validate_for_test(args);
+    let err = result.unwrap_err();
+    assert!(err.0.contains("--dummy-formats is only valid on mounts"));
+}
+
+#[test]
+fn test_bus_reset_restrictions_with_device() {
+    let args = Args {
+        device: Some(DEFAULT_DEVICE_NUM),
+        dummy_formats: false,
+        bus_reset: true,
+        mount: false,
+        unmount: false,
+        mountpoint: None,
+        help: None,
+    };
+
+    let result = validate_for_test(args);
+    let err = result.unwrap_err();
+    assert!(err
+        .0
+        .contains("--device is only valid on mounts and unmounts"));
+}
+
+#[test]
+fn test_valid_mountpoint() {
+    let temp_dir = setup_test_dir();
+    let mount_path = temp_dir.path().to_path_buf();
+
+    let args = Args {
+        device: None,
+        dummy_formats: false,
+        bus_reset: false,
+        mount: true,
+        unmount: false,
+        mountpoint: Some(mount_path.clone()),
+        help: None,
+    };
+
+    let validated = validate_for_test(args).unwrap();
+    assert_eq!(validated.mountpoint.unwrap(), mount_path);
+}
+
+#[test]
+fn test_mountpoint_string_conversion() {
+    let temp_dir = setup_test_dir();
+    let mount_path = temp_dir.path().to_path_buf();
+    let mount_str = mount_path.to_str().unwrap().to_string();
+
+    let args = Args {
+        device: None,
+        dummy_formats: false,
+        bus_reset: false,
+        mount: true,
+        unmount: false,
+        mountpoint: Some(mount_path),
+        help: None,
+    };
+
+    let validated = validate_for_test(args).unwrap();
+    assert_eq!(validated.mountpoint_str.unwrap(), mount_str);
+}
+
+#[test]
+fn test_dummy_formats_flag() {
+    let temp_dir = setup_test_dir();
+    let mount_path = temp_dir.path().to_path_buf();
+
+    let args = Args {
+        device: None,
+        dummy_formats: true,
+        bus_reset: false,
+        mount: true,
+        unmount: false,
+        mountpoint: Some(mount_path),
+        help: None,
+    };
+
+    let validated = validate_for_test(args).unwrap();
+    assert!(validated.dummy_formats);
+}
+
+#[test]
+fn test_no_operation_specified() {
+    let args = Args {
+        device: None,
+        dummy_formats: false,
+        bus_reset: false,
+        mount: false,
+        unmount: false,
+        mountpoint: None,
+        help: None,
+    };
+
+    let result = validate_for_test(args);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.0,
+        "No operation specified. Use --mount, --unmount, or --bus-reset"
+    );
+}
+
+#[test]
+fn test_nonexistent_mountpoint() {
+    let args = Args {
+        device: None,
+        dummy_formats: false,
+        bus_reset: false,
+        mount: true,
+        unmount: false,
+        mountpoint: Some(PathBuf::from("/this/path/does/not/exist")),
+        help: None,
+    };
+
+    let result = validate_for_test(args);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err
+        .0
+        .contains("Mountpoint /this/path/does/not/exist is not a directory"));
+}
+
+#[test]
+fn test_non_writable_mountpoint() {
+    use std::fs::{self, Permissions};
+    use std::os::unix::fs::PermissionsExt;
+
+    // Create a temporary directory
+    let temp_dir = setup_test_dir();
+    let mount_path = temp_dir.path().to_path_buf();
+
+    // Remove write permissions
+    fs::set_permissions(&mount_path, Permissions::from_mode(0o444))
+        .expect("Failed to set permissions");
+
+    let args = Args {
+        device: None,
+        dummy_formats: false,
+        bus_reset: false,
+        mount: true,
+        unmount: false,
+        mountpoint: Some(mount_path.clone()),
+        help: None,
+    };
+
+    let result = validate_for_test(args);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.0.contains("No write permission for mountpoint"));
+
+    // Restore write permissions for cleanup
+    fs::set_permissions(&mount_path, Permissions::from_mode(0o755))
+        .expect("Failed to restore permissions");
+}
+
+#[test]
+fn test_validated_args_log() {
+    let temp_dir = setup_test_dir();
+    let mount_path = temp_dir.path().to_path_buf();
+    let mount_str = mount_path.to_str().unwrap().to_string();
+
+    let validated = ValidatedArgs {
+        device: Some(DEFAULT_DEVICE_NUM),
+        dummy_formats: true,
+        bus_reset: true,
+        mount: true,
+        unmount: false,
+        mountpoint: Some(mount_path),
+        mountpoint_str: Some(mount_str),
+    };
+
+    // This test mainly ensures the log method doesn't panic
+    validated.log();
 }

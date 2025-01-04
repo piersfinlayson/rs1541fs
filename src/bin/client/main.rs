@@ -322,157 +322,161 @@ fn get_socket_path() -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use mockall::mock;
-    use mockall::predicate::*;
-    use std::io::Write;
-    use std::os::unix::net::UnixListener;
-    use std::thread;
-    use tempfile::tempdir;
+use mockall::mock;
+#[cfg(test)]
+use mockall::predicate::*;
+#[cfg(test)]
+use std::os::unix::net::UnixListener;
+#[cfg(test)]
+use std::thread;
+#[cfg(test)]
+use tempfile::tempdir;
 
-    // Mock UnixStream for testing IPC
-    mock! {
-        UnixStream {}
-        impl Read for UnixStream {
-            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize>;
-        }
-        impl Write for UnixStream {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize>;
-            fn flush(&mut self) -> std::io::Result<()>;
-        }
+#[cfg(test)]
+// Mock UnixStream for testing IPC
+mock! {
+    UnixStream {}
+    impl Read for UnixStream {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize>;
     }
-
-    // Helper to create a mock PID file
-    fn create_pid_file(pid: u32) -> tempfile::NamedTempFile {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        writeln!(file.as_file(), "{}", pid).unwrap();
-        file
-    }
-
-    fn setup_mock_socket() -> (UnixListener, PathBuf) {
-        let socket_dir = tempdir().unwrap();
-        let socket_path = socket_dir.path().join("test.sock");
-
-        // Clean up existing socket if it exists
-        if socket_path.exists() {
-            let _ = std::fs::remove_file(&socket_path);
-        }
-
-        *TEST_SOCKET_PATH.lock().unwrap() = socket_path.clone();
-        let listener = UnixListener::bind(&socket_path).expect("Failed to bind socket");
-        (listener, socket_path)
-    }
-
-    #[test]
-    fn test_verify_daemon_process_success() {
-        let pid = std::process::id();
-        let pid_file = create_pid_file(pid);
-
-        assert!(verify_daemon_process(pid_file.path()).is_ok());
-    }
-
-    #[test]
-    fn test_verify_daemon_process_invalid_pid() {
-        let pid_file = create_pid_file(99999999); // Invalid PID
-        assert!(matches!(
-            verify_daemon_process(pid_file.path()),
-            Err(ClientError::DaemonStartup(_))
-        ));
-    }
-
-    #[test]
-    fn test_send_request_timeout() {
-        let (listener, socket_path) = setup_mock_socket();
-
-        thread::spawn(move || {
-            let (_stream, _) = listener.accept().unwrap();
-            thread::sleep(Duration::from_secs(OPERATION_TIMEOUT.as_secs() + 1));
-        });
-
-        std::env::set_var("SOCKET_PATH", socket_path.to_str().unwrap());
-
-        let request = Request::Ping;
-        assert!(matches!(send_request(request), Err(ClientError::IPC(_))));
-    }
-
-    #[test]
-    fn test_create_request_mount() {
-        let args = ValidatedArgs {
-            device: Some(8),
-            dummy_formats: true,
-            bus_reset: false,
-            mount: true,
-            unmount: false,
-            mountpoint: Some(PathBuf::from("/test/mount")),
-            mountpoint_str: Some("/test/mount".to_string()),
-        };
-
-        let request = create_request(&args);
-        match request {
-            Request::Mount {
-                mountpoint,
-                device,
-                dummy_formats,
-                bus_reset,
-            } => {
-                assert_eq!(mountpoint, "/test/mount");
-                assert_eq!(device, 8);
-                assert!(dummy_formats);
-                assert!(!bus_reset);
-            }
-            _ => panic!("Expected Mount request"),
-        }
-    }
-
-    #[test]
-    fn test_create_request_unmount() {
-        let args = ValidatedArgs {
-            device: Some(8),
-            dummy_formats: false,
-            bus_reset: false,
-            mount: false,
-            unmount: true,
-            mountpoint: Some(PathBuf::from("/test/mount")),
-            mountpoint_str: Some("/test/mount".to_string()),
-        };
-
-        let request = create_request(&args);
-        match request {
-            Request::Unmount { mountpoint, device } => {
-                assert_eq!(mountpoint, Some("/test/mount".to_string()));
-                assert_eq!(device, Some(8));
-            }
-            _ => panic!("Expected Unmount request"),
-        }
-    }
-
-    #[test]
-    fn test_create_request_bus_reset() {
-        let args = ValidatedArgs {
-            device: None,
-            dummy_formats: false,
-            bus_reset: true,
-            mount: false,
-            unmount: false,
-            mountpoint: None,
-            mountpoint_str: None,
-        };
-
-        let request = create_request(&args);
-        assert!(matches!(request, Request::BusReset));
-    }
-
-    #[test]
-    fn test_command_env_if_exists() {
-        std::env::set_var("TEST_VAR", "test_value");
-        let mut cmd = Command::new("test");
-        cmd.env_if_exists("TEST_VAR");
-
-        // Get environment from Command
-        let envs: Vec<_> = cmd.get_envs().collect();
-        assert!(envs.iter().any(|(key, value)| {
-            key.to_str().unwrap() == "TEST_VAR" && value.unwrap().to_str().unwrap() == "test_value"
-        }));
+    impl Write for UnixStream {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize>;
+        fn flush(&mut self) -> std::io::Result<()>;
     }
 }
+
+#[cfg(test)]
+// Helper to create a mock PID file
+fn create_pid_file(pid: u32) -> tempfile::NamedTempFile {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    writeln!(file.as_file(), "{}", pid).unwrap();
+    file
+}
+
+#[cfg(test)]
+fn setup_mock_socket() -> (UnixListener, PathBuf) {
+    let socket_dir = tempdir().unwrap();
+    let socket_path = socket_dir.path().join("test.sock");
+
+    // Clean up existing socket if it exists
+    if socket_path.exists() {
+        let _ = std::fs::remove_file(&socket_path);
+    }
+
+    *TEST_SOCKET_PATH.lock().unwrap() = socket_path.clone();
+    let listener = UnixListener::bind(&socket_path).expect("Failed to bind socket");
+    (listener, socket_path)
+}
+
+#[test]
+fn test_verify_daemon_process_success() {
+    let pid = std::process::id();
+    let pid_file = create_pid_file(pid);
+
+    assert!(verify_daemon_process(pid_file.path()).is_ok());
+}
+
+#[test]
+fn test_verify_daemon_process_invalid_pid() {
+    let pid_file = create_pid_file(99999999); // Invalid PID
+    assert!(matches!(
+        verify_daemon_process(pid_file.path()),
+        Err(ClientError::DaemonStartup(_))
+    ));
+}
+
+#[test]
+fn test_send_request_timeout() {
+    let (listener, socket_path) = setup_mock_socket();
+
+    thread::spawn(move || {
+        let (_stream, _) = listener.accept().unwrap();
+        thread::sleep(Duration::from_secs(OPERATION_TIMEOUT.as_secs() + 1));
+    });
+
+    std::env::set_var("SOCKET_PATH", socket_path.to_str().unwrap());
+
+    let request = Request::Ping;
+    assert!(matches!(send_request(request), Err(ClientError::IPC(_))));
+}
+
+#[test]
+fn test_create_request_mount() {
+    let args = ValidatedArgs {
+        device: Some(8),
+        dummy_formats: true,
+        bus_reset: false,
+        mount: true,
+        unmount: false,
+        mountpoint: Some(PathBuf::from("/test/mount")),
+        mountpoint_str: Some("/test/mount".to_string()),
+    };
+
+    let request = create_request(&args);
+    match request {
+        Request::Mount {
+            mountpoint,
+            device,
+            dummy_formats,
+            bus_reset,
+        } => {
+            assert_eq!(mountpoint, "/test/mount");
+            assert_eq!(device, 8);
+            assert!(dummy_formats);
+            assert!(!bus_reset);
+        }
+        _ => panic!("Expected Mount request"),
+    }
+}
+
+#[test]
+fn test_create_request_unmount() {
+    let args = ValidatedArgs {
+        device: Some(8),
+        dummy_formats: false,
+        bus_reset: false,
+        mount: false,
+        unmount: true,
+        mountpoint: Some(PathBuf::from("/test/mount")),
+        mountpoint_str: Some("/test/mount".to_string()),
+    };
+
+    let request = create_request(&args);
+    match request {
+        Request::Unmount { mountpoint, device } => {
+            assert_eq!(mountpoint, Some("/test/mount".to_string()));
+            assert_eq!(device, Some(8));
+        }
+        _ => panic!("Expected Unmount request"),
+    }
+}
+
+#[test]
+fn test_create_request_bus_reset() {
+    let args = ValidatedArgs {
+        device: None,
+        dummy_formats: false,
+        bus_reset: true,
+        mount: false,
+        unmount: false,
+        mountpoint: None,
+        mountpoint_str: None,
+    };
+
+    let request = create_request(&args);
+    assert!(matches!(request, Request::BusReset));
+}
+
+#[test]
+fn test_command_env_if_exists() {
+    std::env::set_var("TEST_VAR", "test_value");
+    let mut cmd = Command::new("test");
+    cmd.env_if_exists("TEST_VAR");
+
+    // Get environment from Command
+    let envs: Vec<_> = cmd.get_envs().collect();
+    assert!(envs.iter().any(|(key, value)| {
+        key.to_str().unwrap() == "TEST_VAR" && value.unwrap().to_str().unwrap() == "test_value"
+    }));
+}
+
