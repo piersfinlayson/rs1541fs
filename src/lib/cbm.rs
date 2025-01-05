@@ -1,4 +1,4 @@
-pub use crate::opencbm::CbmDeviceInfo;
+pub use crate::cbmtypes::CbmDeviceInfo;
 use crate::opencbm::OpenCbm;
 
 use log::info;
