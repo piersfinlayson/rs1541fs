@@ -196,8 +196,14 @@ fn handle_identify(cbm: Arc<Mutex<Cbm>>, device: u8) -> Response {
         .unwrap_or_else(|e| Response::Error(e));
 
     match &result {
-        Response::Identified { device_type, description } => {
-            debug!("Identify completed successfully {} {}", device_type, description)
+        Response::Identified {
+            device_type,
+            description,
+        } => {
+            debug!(
+                "Identify completed successfully {} {}",
+                device_type, description
+            )
         }
         Response::Error(e) => debug!("Identify failed: {}", e),
         _ => unreachable!(),

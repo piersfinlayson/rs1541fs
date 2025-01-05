@@ -1,8 +1,8 @@
 pub mod cbm;
+pub mod cbmtypes;
 pub mod ipc;
 pub mod logging;
 pub mod validate;
-pub mod cbmtypes;
 
 // Contains ffi wrappers - not be used outside this library
 mod opencbm;

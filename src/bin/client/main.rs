@@ -296,8 +296,14 @@ fn main() -> Result<()> {
             info!("Successfully received dying respose from daemon");
             Ok(())
         }
-        Response::Identified { device_type, description } => {
-            info!("Identified device as model {} description {}", device_type, description);
+        Response::Identified {
+            device_type,
+            description,
+        } => {
+            info!(
+                "Identified device as model {} description {}",
+                device_type, description
+            );
             Ok(())
         }
     }

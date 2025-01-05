@@ -33,5 +33,8 @@ pub enum Response {
     Error(String),
     Pong,
     Dying,
-    Identified { device_type: String, description: String },
+    Identified {
+        device_type: String,
+        description: String,
+    },
 }
