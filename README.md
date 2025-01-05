@@ -1,4 +1,5 @@
 # rs1541fs
+
 A Rust implementation of the 1541fs FUSE-based filsystem for Commodore disk drives
 
 ## Build Dependencies
@@ -7,7 +8,8 @@ Before building rs1541fs for the first time you must install the build dependenc
 
 ### OpenCBM
 
-rs1541fs relies on OpenCBM.  You must build and install it - you van do so like this:
+rs1541fs relies on OpenCBM.  You must build and install OpenCBM - you can do so like this:
+
 ```
 sudo apt-get install build-essential libusb-dev cc65 linux-headers-$(uname -r)
 git clone https://github.com/OpenCBM/OpenCBM
@@ -25,7 +27,7 @@ cbmctrl detect
 
 This should return nothing if you have no drives connected, otherwise a list of detect drives.
 
-See Troubleshooting below if you get errors when running cbmctrl - permission issues are common.
+See [Troubleshooting](#troubleshooting) below if you get errors when running cbmctrl - permission issues are common.
 
 ### clang
 
@@ -42,7 +44,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
 ```
 
-## Building
+## Building rs1541fs
 
 This will build both the server (daemon) and client:
 
@@ -50,7 +52,11 @@ This will build both the server (daemon) and client:
 cargo build
 ```
 
-## Running
+## Running rs1541fs
+
+There are two parts to rs1541fs:
+* A daemon which runs as a background process and handles all communicates to the XUM1541 and, through it, to the Commodore disk drives.
+* A client which provides a CLI to perform functions - like mounting and unmounting filesystems, and running commands directly on the drives.
 
 The client will automatically run the server if it isn't running, and if it can find the binary.  If you did a regular ```cargo build``` then you'll have the server (1541fsd) and also the client in the target/debug directory, so you can run the client (1541fs) like this:
 
@@ -72,12 +78,11 @@ The identify command will attempt to identify what Commodore drive is connected 
 [INFO ] Identified device 8 as model 1541 description 1540 or 1541
 ```
 
-
 ## Troubleshooting
 
 ### Logging
 
-Use ```RUST_LOG=<log level>``` before the 1541fs command.  If you're hitting problems ```RUST_LOG=debug``` is a good bet.  If 1541fs starts 1541fsd (i.e. it wasn't already running), this log level (via this environment variable) will also be propogated to the invoked 1541fsd.
+Use ```RUST_LOG=<log level>``` before the 1541fs command.  If you're hitting problems then ```RUST_LOG=debug``` is a good bet.  If 1541fs starts 1541fsd (i.e. it wasn't already running), this log level (via this environment variable) will also be propogated to the invoked 1541fsd.
 
 1541fs logs go to stdout.
 
@@ -90,7 +95,7 @@ $template CustomFormat,"%TIMESTAMP% %HOSTNAME% %syslogtag% %syslogseverity-text:
 
 ### XUM1541/USB device Permission Issues
 
-If you don't have XUM1541 USB permissions right on your system you'll probably get something like this:
+If you don't have XUM1541 USB permissions correct on your system you'll probably get something like this:
 
 ```
 error: cannot query product name: error sending control message: Operation not permitted
