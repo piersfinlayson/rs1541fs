@@ -26,6 +26,12 @@ use libc::intptr_t;
 use log::{debug, error};
 use std::io::Error;
 use std::io::ErrorKind;
+use std::time::Duration;
+use std::thread;
+use std::sync::mpsc;
+
+// How long to allow an FFI call into libopencbm to take before giving up
+const FFI_CALL_THREAD_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub struct OpenCbm {
@@ -36,6 +42,8 @@ pub struct OpenCbm {
 pub enum OpenCbmError {
     ConnectionError(String),
     UnknownDevice(String),
+    ThreadTimeout,
+    ThreadPanic,
     Other(String),
 }
 
@@ -58,6 +66,8 @@ impl std::fmt::Display for OpenCbmError {
         match self {
             OpenCbmError::ConnectionError(msg) => write!(f, "{}", msg),
             OpenCbmError::UnknownDevice(msg) => write!(f, "{}", msg),
+            OpenCbmError::ThreadTimeout => write!(f, "FFI call timed out"),
+            OpenCbmError::ThreadPanic => write!(f, "FFI call thread panicked"),
             OpenCbmError::Other(e) => write!(f, "{}", e),
         }
     }
@@ -94,6 +104,31 @@ macro_rules! opencbm_retry {
     }};
 }
 
+macro_rules! opencbm_thread_timeout {
+    ($call:expr) => {{
+        let (tx, rx) = mpsc::channel();
+        
+        let thread_handle = thread::spawn(move || {
+            let result = $call;
+            let _ = tx.send(result);
+        });
+
+        match rx.recv_timeout(FFI_CALL_THREAD_TIMEOUT) {
+            Ok(result) => {
+                // Wait for thread to finish to ensure cleanup
+                match thread_handle.join() {
+                    Ok(_) => result,
+                    Err(_) => Err(OpenCbmError::ThreadPanic),
+                }
+            },
+            Err(_) => {
+                // Thread is likely blocked in FFI call
+                Err(OpenCbmError::ThreadTimeout)
+            }
+        }
+    }};
+}
+
 pub type OpenCbmResult<T> = std::result::Result<T, OpenCbmError>;
 
 /// Wrapper for Cbm library integration
@@ -101,14 +136,27 @@ pub type OpenCbmResult<T> = std::result::Result<T, OpenCbmError>;
 /// Provides safe access to Cbm operations and ensures proper
 /// synchronization when accessing the hardware bus.
 impl OpenCbm {
+
     pub fn open() -> OpenCbmResult<OpenCbm> {
-        let mut handle: intptr_t = 0;
-        let adapter: *mut i8 = std::ptr::null_mut();
-        opencbm_retry!(
-            cbm_driver_open_ex(&mut handle as *mut intptr_t, adapter),
-            "cbm_driver_open_ex"
-        )?;
-        Ok(OpenCbm { handle })
+        use std::sync::{Arc, Mutex};
+    
+        let handle = Arc::new(Mutex::new(0 as intptr_t));
+        let handle_clone = handle.clone();
+    
+        let result = opencbm_thread_timeout!({
+            let mut handle_guard = handle_clone.lock().unwrap();
+            let adapter: *mut i8 = std::ptr::null_mut();
+            
+            match opencbm_retry!(
+                cbm_driver_open_ex(&mut *handle_guard as *mut intptr_t, adapter),
+                "cbm_driver_open_ex"
+            ) {
+                Ok(()) => Ok(*handle_guard),
+                Err(e) => Err(e),
+            }
+        })?;
+    
+        Ok(OpenCbm { handle: result })
     }
 
     pub fn reset(&self) -> OpenCbmResult<()> {
@@ -116,44 +164,57 @@ impl OpenCbm {
             error!("Invalid handle value: {:#x}", self.handle);
             return Err(Error::new(ErrorKind::InvalidInput, "Invalid handle value").into());
         }
-
-        opencbm_retry!(cbm_reset(self.handle), "cbm_reset")
+    
+        let handle = self.handle;  // Clone because we need to move it to the thread
+        
+        opencbm_thread_timeout!({
+            opencbm_retry!(cbm_reset(handle), "cbm_reset")
+        })
     }
 
-    pub fn close(&self) {
-        debug!("Calling: cbm_driver_close");
-        unsafe { cbm_driver_close(self.handle) };
-        debug!("Returned: cbm_driver_close");
+    pub fn close(&self) -> OpenCbmResult<()> {
+        let handle = self.handle;
+        
+        opencbm_thread_timeout!({
+            debug!("Calling: cbm_driver_close");
+            unsafe { cbm_driver_close(handle) };
+            debug!("Returned: cbm_driver_close");
+            Ok(())
+        })
     }
 
     pub fn identify(&self, device: u8) -> OpenCbmResult<CbmDeviceInfo> {
-        let mut device_type: cbm_device_type_e = Default::default();
-        let mut description: *const libc::c_char = std::ptr::null();
-
-        debug!("Calling: cbm_identify");
-        let result = unsafe { cbm_identify(self.handle, device, &mut device_type, &mut description) };
-        debug!("Returned: cbm_identify");
-
-        let description = unsafe {
-            if !description.is_null() {
-                std::ffi::CStr::from_ptr(description)
-                    .to_string_lossy()
-                    .into_owned()
+        let handle = self.handle; // Clone because we need to move it to the thread
+        
+        opencbm_thread_timeout!({
+            let mut device_type: cbm_device_type_e = Default::default();
+            let mut description: *const libc::c_char = std::ptr::null();
+    
+            debug!("Calling: cbm_identify");
+            let result = unsafe { cbm_identify(handle, device, &mut device_type, &mut description) };
+            debug!("Returned: cbm_identify");
+    
+            let description = unsafe {
+                if !description.is_null() {
+                    std::ffi::CStr::from_ptr(description)
+                        .to_string_lossy()
+                        .into_owned()
+                } else {
+                    String::new()
+                }
+            };
+    
+            if result == 0 {
+                Ok(CbmDeviceInfo { device_type: device_type.into(), description })
             } else {
-                String::new()
+                Err(OpenCbmError::UnknownDevice(description))
             }
-        };
-
-        if result == 0 {
-            Ok(CbmDeviceInfo { device_type: device_type.into(), description })
-        } else {
-            Err(OpenCbmError::UnknownDevice(description))
-        }
+        })
     }
 }
 
 impl Drop for OpenCbm {
     fn drop(&mut self) {
-        self.close();
+        let _ = self.close();
     }
 }
