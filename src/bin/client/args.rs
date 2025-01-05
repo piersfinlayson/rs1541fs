@@ -140,7 +140,8 @@ impl Args {
                 // Check the mountpoint and update path and mountpoint in
                 // case it gets canonicalized
                 if mountpoint.is_some() {
-                    let new_path = validate_mountpoint(Path::new(mountpoint.as_ref().unwrap()), false, true)?;
+                    let new_path =
+                        validate_mountpoint(Path::new(mountpoint.as_ref().unwrap()), false, true)?;
                     *path = Some(new_path.clone());
                     *mountpoint = Some(new_path.display().to_string());
                 }
@@ -155,8 +156,8 @@ impl Args {
                 validate_device(Some(*device), DeviceValidation::Required)?;
             }
             // Resetbus and Kill don't need validation
-            ClientOperation::Resetbus => {},
-            ClientOperation::Kill => {},
+            ClientOperation::Resetbus => {}
+            ClientOperation::Kill => {}
         }
         Ok(self)
     }
@@ -244,7 +245,10 @@ fn test_valid_device_numbers() {
 
         let validated = validate_for_test(args).unwrap();
         match validated.operation {
-            ClientOperation::Mount { device: validated_device, .. } => {
+            ClientOperation::Mount {
+                device: validated_device,
+                ..
+            } => {
                 assert_eq!(validated_device, device);
             }
             _ => panic!("Wrong operation type"),
@@ -406,7 +410,10 @@ fn test_mount_permissions() {
 
     let result = validate_for_test(args);
     assert!(result.is_err());
-    assert!(result.unwrap_err().0.contains("No write permission for mountpoint"));
+    assert!(result
+        .unwrap_err()
+        .0
+        .contains("No write permission for mountpoint"));
 
     // Restore permissions for cleanup
     fs::set_permissions(temp_dir.path(), Permissions::from_mode(0o755))

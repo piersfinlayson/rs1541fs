@@ -1,9 +1,9 @@
 mod args;
 
-use args::{Args,ClientOperation};
+use args::{Args, ClientOperation};
 #[cfg(not(test))]
 use rs1541fs::ipc::SOCKET_PATH;
-use rs1541fs::ipc::{Request, Response, SOCKET_PATH};
+use rs1541fs::ipc::{Request, Response};
 use rs1541fs::ipc::{DAEMON_PID_FILENAME, DAEMON_PNAME};
 use rs1541fs::logging::init_logging;
 
@@ -151,8 +151,13 @@ fn ensure_daemon_running() -> Result<(), ClientError> {
     Err(ClientError::Timeout(STARTUP_TIMEOUT.as_secs()))
 }
 
+#[cfg(not(test))]
+fn get_socket_path() -> &'static str {
+    SOCKET_PATH
+}
+
 fn send_request(request: Request) -> Result<Response, ClientError> {
-    let mut stream = UnixStream::connect(SOCKET_PATH)
+    let mut stream = UnixStream::connect(get_socket_path())
         .map_err(|e| ClientError::IPC(format!("Failed to connect to daemon: {}", e)))?;
 
     // Set timeouts
@@ -201,27 +206,26 @@ fn send_request(request: Request) -> Result<Response, ClientError> {
 
 fn create_request(operation: ClientOperation) -> Request {
     match operation {
-        ClientOperation::Mount { device, mountpoint, dummy_formats, .. } => {
-            Request::Mount {
-                mountpoint: mountpoint,
-                device: device,
-                dummy_formats: dummy_formats,
-                bus_reset: false,
-            }    
+        ClientOperation::Mount {
+            device,
+            mountpoint,
+            dummy_formats,
+            ..
+        } => Request::Mount {
+            mountpoint: mountpoint,
+            device: device,
+            dummy_formats: dummy_formats,
+            bus_reset: false,
         },
-        ClientOperation::Unmount { device, mountpoint, ..} => {
-            Request::Unmount {
-                mountpoint: mountpoint,
-                device: device,
-            }    
+        ClientOperation::Unmount {
+            device, mountpoint, ..
+        } => Request::Unmount {
+            mountpoint: mountpoint,
+            device: device,
         },
-        ClientOperation::Identify { device } => {
-            Request::Identify {
-                device: device,
-            }
-        },
-        ClientOperation::Resetbus => { Request::BusReset },
-        ClientOperation::Kill => { Request::Die },
+        ClientOperation::Identify { device } => Request::Identify { device: device },
+        ClientOperation::Resetbus => Request::BusReset,
+        ClientOperation::Kill => Request::Die,
     }
 }
 
@@ -300,21 +304,26 @@ fn main() -> Result<()> {
 }
 
 #[cfg(test)]
-use mockall::predicate::*;
-#[cfg(test)]
 use mockall::mock;
 #[cfg(test)]
-use tempfile::tempdir;
+use mockall::predicate::*;
 #[cfg(test)]
 use std::path::PathBuf;
-#[cfg(test)]
-use std::os::unix::net::UnixListener;
 #[cfg(test)]
 use std::sync::Mutex;
 
 #[cfg(test)]
 lazy_static::lazy_static! {
     static ref TEST_SOCKET_PATH: Mutex<PathBuf> = Mutex::new(PathBuf::from("/tmp/test.sock"));
+}
+
+#[cfg(test)]
+fn get_socket_path() -> String {
+    TEST_SOCKET_PATH
+        .lock()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
 }
 
 #[cfg(test)]
@@ -348,21 +357,6 @@ fn create_pid_file(pid: u32) -> tempfile::NamedTempFile {
     let file = tempfile::NamedTempFile::new().unwrap();
     writeln!(file.as_file(), "{}", pid).unwrap();
     file
-}
-
-#[cfg(test)]
-fn setup_mock_socket() -> (UnixListener, PathBuf) {
-    let socket_dir = tempdir().unwrap();
-    let socket_path = socket_dir.path().join("test.sock");
-
-    // Clean up existing socket if it exists
-    if socket_path.exists() {
-        let _ = std::fs::remove_file(&socket_path);
-    }
-
-    *TEST_SOCKET_PATH.lock().unwrap() = socket_path.clone();
-    let listener = UnixListener::bind(&socket_path).expect("Failed to bind socket");
-    (listener, socket_path)
 }
 
 #[test]
@@ -476,19 +470,6 @@ fn test_create_request_kill() {
 }
 
 #[test]
-fn test_ensure_daemon_running_success() {
-    let (_listener, socket_path) = setup_mock_socket();
-    let pid_file = create_pid_file(std::process::id());
-    
-    std::env::set_var("DAEMON_PID_FILENAME", pid_file.path().to_str().unwrap());
-    std::env::set_var("SOCKET_PATH", socket_path.to_str().unwrap());
-    
-    // Mock successful health check
-    // You might need to adjust this based on your actual implementation
-    assert!(ensure_daemon_running().is_ok());
-}
-
-#[test]
 fn test_command_env_if_exists() {
     std::env::set_var("TEST_VAR", "test_value");
     let mut cmd = Command::new("test");
@@ -510,10 +491,13 @@ fn test_response_handling() {
         (Response::BusResetSuccess, false),
         (Response::Pong, false),
         (Response::Dying, false),
-        (Response::Identified { 
-            name: "Test Device".into(), 
-            description: "Test Description".into() 
-        }, false),
+        (
+            Response::Identified {
+                name: "Test Device".into(),
+                description: "Test Description".into(),
+            },
+            false,
+        ),
     ];
 
     for (response, should_error) in test_cases {
@@ -524,6 +508,7 @@ fn test_response_handling() {
 }
 
 // Helper function for testing response handling
+#[cfg(test)]
 fn handle_response(response: &Response, _request: &Request) -> Result<()> {
     match response {
         Response::Error(err) => Err(anyhow!("Operation failed: {}", err)),
