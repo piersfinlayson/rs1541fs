@@ -44,6 +44,7 @@ fn handle_client_request(cbm: Arc<Mutex<Cbm>>, stream: &mut UnixStream) -> Resul
         Request::BusReset => handle_bus_reset(cbm),
         Request::Ping => handle_ping(),
         Request::Die => handle_die(),
+        Request::Identify { device } => handle_identify(cbm, device),
     };
 
     match send_response(stream, response) {
@@ -179,6 +180,30 @@ fn handle_die() -> Response {
     info!("Request: Die");
     stop_server();
     Response::Dying
+}
+
+fn handle_identify(cbm: Arc<Mutex<Cbm>>, device: u8) -> Response {
+    info!("Request: Identify");
+
+    let result = cbm
+        .lock()
+        .map_err(|e| format!("Failed to acquire cbm lock {}", e))
+        .and_then(|mutex| mutex.identify(device))
+        .map(|device_info| Response::Identified {
+            device_type: format!("{}", device_info.device_type.as_str()),
+            description: device_info.description,
+        })
+        .unwrap_or_else(|e| Response::Error(e));
+
+    match &result {
+        Response::Identified { device_type, description } => {
+            debug!("Identify completed successfully {} {}", device_type, description)
+        }
+        Response::Error(e) => debug!("Identify failed: {}", e),
+        _ => unreachable!(),
+    }
+
+    result
 }
 
 fn send_response(stream: &mut UnixStream, response: Response) -> Result<()> {

@@ -22,7 +22,7 @@ pub enum Request {
     Die,
     Identify {
         device: u8,
-    }
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -33,8 +33,5 @@ pub enum Response {
     Error(String),
     Pong,
     Dying,
-    Identified {
-        name: String,
-        description: String,
-    }
+    Identified { device_type: String, description: String },
 }

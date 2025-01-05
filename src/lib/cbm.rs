@@ -1,3 +1,4 @@
+pub use crate::opencbm::CbmDeviceInfo;
 use crate::opencbm::OpenCbm;
 
 use log::info;
@@ -44,12 +45,12 @@ impl Cbm {
         Ok(())
     }
 
-    pub fn identify(&self, device: u8) -> CbmResult<()> {
+    pub fn identify(&self, device: u8) -> CbmResult<CbmDeviceInfo> {
         let cbm = self
             .handle
             .lock()
             .map_err(|_| "Failed to acquire Cbm lock".to_string())?;
-        cbm.identify(device).map_err(|e| e.to_string())?;
-        Ok(())
+        let device_info = cbm.identify(device).map_err(|e| e.to_string())?;
+        Ok(device_info)
     }
 }

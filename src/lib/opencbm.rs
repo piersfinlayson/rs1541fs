@@ -60,6 +60,70 @@ impl std::fmt::Display for OpenCbmError {
         }
     }
 }
+pub struct CbmDeviceInfo {
+    pub device_type: CbmDeviceType,
+    pub description: String,
+}
+
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CbmDeviceType {
+    Unknown = -1,
+    Cbm1541 = 0,
+    Cbm1570 = 1,
+    Cbm1571 = 2,
+    Cbm1581 = 3,
+    Cbm2040 = 4,
+    Cbm2031 = 5,
+    Cbm3040 = 6,
+    Cbm4040 = 7,
+    Cbm4031 = 8,
+    Cbm8050 = 9,
+    Cbm8250 = 10,
+    Sfd1001 = 11,
+    FdX000 = 12,
+}
+
+impl CbmDeviceType {
+    pub fn from_raw(value: i32) -> Self {
+        match value {
+            -1 => Self::Unknown,
+            0 => Self::Cbm1541,
+            1 => Self::Cbm1570,
+            2 => Self::Cbm1571,
+            3 => Self::Cbm1581,
+            4 => Self::Cbm2040,
+            5 => Self::Cbm2031,
+            6 => Self::Cbm3040,
+            7 => Self::Cbm4040,
+            8 => Self::Cbm4031,
+            9 => Self::Cbm8050,
+            10 => Self::Cbm8250,
+            11 => Self::Sfd1001,
+            12 => Self::FdX000,
+            _ => Self::Unknown, // Handle any unknown values
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown Device",
+            Self::Cbm1541 => "VIC 1541",
+            Self::Cbm1570 => "VIC 1570",
+            Self::Cbm1571 => "VIC 1571",
+            Self::Cbm1581 => "VIC 1581",
+            Self::Cbm2040 => "CBM-2040 DOS1/2",
+            Self::Cbm2031 => "CBM-2031 DOS2.6",
+            Self::Cbm3040 => "CBM-3040 DOS1/2",
+            Self::Cbm4040 => "CBM-4040 DOS2",
+            Self::Cbm4031 => "CBM-4031 DOS2.6",
+            Self::Cbm8050 => "CBM-8050",
+            Self::Cbm8250 => "CBM-8250",
+            Self::Sfd1001 => "SFD-1001",
+            Self::FdX000 => "CMD FD2000/FD4000",
+        }
+    }
+}
 
 /// Macro to wrap cbm_ calls in order to retry up to once if a timeout is hit
 macro_rules! opencbm_retry {
@@ -124,18 +188,17 @@ impl OpenCbm {
         debug!("Returned: cbm_driver_close");
     }
 
-    pub fn identify(&self, device: u8) -> OpenCbmResult<String> {
+    pub fn identify(&self, device: u8) -> OpenCbmResult<CbmDeviceInfo> {
         let mut device_type: cbm_device_type_e = Default::default();
-        let mut device_string: *const libc::c_char = std::ptr::null();
+        let mut description: *const libc::c_char = std::ptr::null();
 
         debug!("Calling: cbm_identify");
-        let result =
-            unsafe { cbm_identify(self.handle, device, &mut device_type, &mut device_string) };
+        let result = unsafe { cbm_identify(self.handle, device, &mut device_type, &mut description) };
         debug!("Returned: cbm_identify");
 
-        let device_string = unsafe {
-            if !device_string.is_null() {
-                std::ffi::CStr::from_ptr(device_string)
+        let description = unsafe {
+            if !description.is_null() {
+                std::ffi::CStr::from_ptr(description)
                     .to_string_lossy()
                     .into_owned()
             } else {
@@ -144,9 +207,9 @@ impl OpenCbm {
         };
 
         if result == 0 {
-            Ok(device_string)
+            Ok(CbmDeviceInfo { device_type: CbmDeviceType::from_raw(device_type), description })
         } else {
-            Err(OpenCbmError::UnknownDevice(device_string))
+            Err(OpenCbmError::UnknownDevice(description))
         }
     }
 }
