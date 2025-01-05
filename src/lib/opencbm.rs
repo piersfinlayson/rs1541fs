@@ -33,6 +33,7 @@ pub struct OpenCbm {
 #[derive(Debug)]
 pub enum OpenCbmError {
     ConnectionError(String),
+    UnknownDevice(String),
     Other(String),
 }
 
@@ -54,6 +55,7 @@ impl std::fmt::Display for OpenCbmError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             OpenCbmError::ConnectionError(msg) => write!(f, "{}", msg),
+            OpenCbmError::UnknownDevice(msg) => write!(f, "{}", msg),
             OpenCbmError::Other(e) => write!(f, "{}", e),
         }
     }
@@ -120,6 +122,32 @@ impl OpenCbm {
         debug!("Calling: cbm_driver_close");
         unsafe { cbm_driver_close(self.handle) };
         debug!("Returned: cbm_driver_close");
+    }
+
+    pub fn identify(&self, device: u8) -> OpenCbmResult<String> {
+        let mut device_type: cbm_device_type_e = Default::default();
+        let mut device_string: *const libc::c_char = std::ptr::null();
+
+        debug!("Calling: cbm_identify");
+        let result =
+            unsafe { cbm_identify(self.handle, device, &mut device_type, &mut device_string) };
+        debug!("Returned: cbm_identify");
+
+        let device_string = unsafe {
+            if !device_string.is_null() {
+                std::ffi::CStr::from_ptr(device_string)
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                String::new()
+            }
+        };
+
+        if result == 0 {
+            Ok(device_string)
+        } else {
+            Err(OpenCbmError::UnknownDevice(device_string))
+        }
     }
 }
 

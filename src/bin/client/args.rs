@@ -1,8 +1,101 @@
 use rs1541fs::validate::{validate_device, validate_mountpoint, DeviceValidation};
 
-use clap::{ArgAction, Parser};
+use clap::{ArgAction, Parser, Subcommand};
 use log::debug;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+#[derive(Subcommand, Clone, Debug)]
+pub enum ClientOperation {
+    /// Reset the IEC (or IEEE-488) bus
+    Resetbus,
+
+    /// Mount the filesystem
+    Mount {
+        /// Device number (default: 8)
+        #[arg(short = 'd', long = "device", default_value = "8")]
+        device: u8,
+
+        /// Don't actually format the disk if requested, valid on mount operation only
+        #[arg(short = 'f', long = "dummy-formats", action = ArgAction::SetTrue)]
+        dummy_formats: bool,
+
+        /// Mountpoint path
+        mountpoint: String,
+
+        #[arg(skip)]
+        path: Option<PathBuf>,
+    },
+
+    /// Unmount the filesystem
+    Unmount {
+        /// Device number (default: 8)
+        #[arg(short = 'd', long = "device")]
+        device: Option<u8>,
+
+        /// Optional mountpoint path
+        mountpoint: Option<String>,
+
+        #[arg(skip)]
+        path: Option<PathBuf>,
+    },
+
+    /// Identify the selected device
+    Identify {
+        /// Device number (default: 8)
+        #[arg(short = 'd', long = "device", default_value = "8")]
+        device: u8,
+    },
+
+    /// Kill the 1541fs daemon (1541fsd)
+    Kill,
+}
+
+impl ClientOperation {
+    pub fn log(&self) {
+        match self {
+            ClientOperation::Resetbus => {
+                debug!("Operation: Reset Bus");
+            }
+            ClientOperation::Mount {
+                device,
+                mountpoint,
+                path: _,
+                dummy_formats,
+            } => {
+                debug!(
+                    "Operation: Mount device {} at '{}'{}",
+                    device,
+                    mountpoint,
+                    if *dummy_formats {
+                        " with dummy formats"
+                    } else {
+                        ""
+                    }
+                );
+            }
+            ClientOperation::Unmount {
+                device,
+                mountpoint,
+                path: _,
+            } => {
+                debug!(
+                    "Operation: Unmount device {} or mountpoint {}",
+                    device.unwrap_or_default(),
+                    mountpoint
+                        .as_ref()
+                        .map(|p| format!("{}", p))
+                        .unwrap_or_default()
+                );
+            }
+            ClientOperation::Identify { device } => {
+                debug!("Operation: Identify device {}", device);
+            }
+            ClientOperation::Kill => {
+                debug!("Operation: Kill daemon");
+            }
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -10,174 +103,62 @@ use std::path::PathBuf;
    version = env!("CARGO_PKG_VERSION"),
    author = env!("CARGO_PKG_AUTHORS"),
    about = env!("CARGO_PKG_DESCRIPTION"),
-   disable_help_flag = true,
+   arg_required_else_help = true
 )]
 pub struct Args {
-    /// Set device number, valid on mount and unmount only
-    #[arg(short = 'd', long = "device", value_name = "NUM")]
-    device: Option<u8>,
-
-    /// Don't actually format the disk if requested, valid on mount only
-    #[arg(short = 'f', long = "dummy-formats", action = ArgAction::SetTrue)]
-    dummy_formats: bool,
-
-    /// Reset the IEC bus before mounting the filesystem, or separately, without mount
-    /// or unmount
-    #[arg(short = 'b', long = "bus-reset", action = ArgAction::SetTrue)]
-    bus_reset: bool,
-
-    #[arg(short = 'k', long = "kill", action = ArgAction::SetTrue)]
-    /// Kill the server
-    kill: bool,
-
-    /// Mount the filesystem (requires MOUNTPOINT)
-    #[arg(short = 'm', long = "mount", group = "operation")]
-    mount: bool,
-
-    /// Unmount the filesystem (requires MOUNTPOINT)
-    #[arg(short = 'u', long = "unmount", group = "operation")]
-    unmount: bool,
-
-    /// Directory where the filesystem will be mounted
-    #[arg(required_if_eq("mount", "true"))]
-    mountpoint: Option<PathBuf>,
-
-    /// Print help
-    #[arg(short = '?', short_alias = 'h', long = "help", action = ArgAction::Help)]
-    help: Option<bool>,
+    #[command(subcommand)]
+    pub operation: ClientOperation,
 }
 
-#[derive(Debug)]
-pub struct ValidatedArgs {
-    pub device: Option<u8>,
-    pub dummy_formats: bool,
-    pub bus_reset: bool,
-    pub mount: bool,
-    pub unmount: bool,
-    pub kill: bool,
-    pub mountpoint: Option<PathBuf>,
-    pub mountpoint_str: Option<String>,
-}
-
-impl ValidatedArgs {
-    pub fn log(&self) {
-        debug!("Arguments:");
-        if self.mount {
-            debug!("  Operation: mount");
-            debug!("  Bus reset enabled: {}", self.bus_reset);
-        } else if self.unmount {
-            debug!("  Operation: unmount");
-            debug!("  Bus reset enabled: {}", self.bus_reset);
-        } else if self.bus_reset {
-            debug!("  Operation: bus-reset");
-        } else if self.kill {
-            debug!("  Operatoin: kill");
-        }
-        if self.device.is_some() {
-            debug!("  Device num: {}", self.device.unwrap())
-        }
-        if self.mountpoint.is_some() {
-            debug!(
-                "  Mountpoint: {}",
-                self.mountpoint.clone().unwrap().display()
-            );
-        }
-        if self.mountpoint_str.is_some() {
-            debug!(
-                "  Mountpoint string: {}",
-                self.mountpoint_str.clone().unwrap()
-            );
-        }
-        debug!("  Dummy formats enabled: {}", self.dummy_formats);
-    }
-}
-
-// We do a bunch of validation explicitly in code rather than in Args struct
-// for readability
+// Do expliciy args validation
 impl Args {
-    pub fn validate(self) -> Result<ValidatedArgs, String> {
-        // Check that at least one operation is specified
-        if !self.mount && !self.unmount && !self.bus_reset && !self.kill {
-            return Err(
-                "No operation specified. Use --mount, --unmount, --bus-reset or --kill".to_string(),
-            );
-        }
+    pub fn validate(mut self) -> Result<Self, String> {
+        match &mut self.operation {
+            ClientOperation::Mount {
+                device,
+                mountpoint,
+                path,
+                ..
+            } => {
+                // Check the device number - this is required
+                validate_device(Some(*device), DeviceValidation::Required)?;
 
-        // Nothing is allowed with kill
-        if self.kill {
-            if self.unmount
-                || self.bus_reset
-                || self.mount
-                || self.dummy_formats
-                || self.device.is_some()
-                || self.mountpoint.is_some()
-            {
-                return Err("No other options allowed with --kill".to_string());
+                // Check the mountpoint and update path and mountpoint in
+                // case it gets canonicalized
+                let new_path = validate_mountpoint(Path::new(mountpoint), true, true)?;
+                *path = Some(new_path.clone());
+                *mountpoint = new_path.display().to_string();
             }
-        }
+            ClientOperation::Unmount {
+                device,
+                mountpoint,
+                path,
+            } => {
+                // Check the device number - this is optionl
+                validate_device(*device, DeviceValidation::Optional)?;
 
-        // -f is not allowed with unmount or bus_reset on its own
-        if self.unmount || (self.bus_reset && !self.mount && !self.unmount) {
-            if self.dummy_formats {
-                return Err("--dummy-formats is only valid on mounts".to_string());
+                // Check the mountpoint and update path and mountpoint in
+                // case it gets canonicalized
+                if mountpoint.is_some() {
+                    let new_path = validate_mountpoint(Path::new(mountpoint.as_ref().unwrap()), false, true)?;
+                    *path = Some(new_path.clone());
+                    *mountpoint = Some(new_path.display().to_string());
+                }
+
+                // Only device or mountpoint show be provided on unmount
+                if (*device).is_some() && (*mountpoint).is_some() {
+                    return Err(format!("Only specify --device or mountpoint on unmount"));
+                }
             }
-        }
-
-        // -d is not allowed with bus_reset on its own
-        if self.bus_reset && !self.mount && !self.unmount {
-            if self.device.is_some() {
-                return Err("--device is only valid on mounts and unmounts".to_string());
+            ClientOperation::Identify { device } => {
+                // Check the device number - this is required
+                validate_device(Some(*device), DeviceValidation::Required)?;
             }
+            // Resetbus and Kill don't need validation
+            ClientOperation::Resetbus => {},
+            ClientOperation::Kill => {},
         }
-
-        // Verify we don't have both of mount/unmount when specified
-        if self.mount && self.unmount {
-            return Err("Cannot perform both mount and unmount simultaneously".to_string());
-        }
-
-        // Check device num is valid, and set to default if required
-        let device_num = if self.mount {
-            validate_device(self.device, DeviceValidation::Default)?
-        } else if self.unmount && self.device.is_some() {
-            validate_device(self.device, DeviceValidation::Optional)?
-        } else {
-            None
-        };
-
-        // Get the mountpoint - required on mount, required on unmount if no
-        // device
-        let mountpoint = if self.mount || (self.unmount && !device_num.is_some()) {
-            let mp = self
-                .mountpoint
-                .ok_or_else(|| "No mountpoint specified".to_string())?;
-            Some(validate_mountpoint(&mp, self.mount, true).map_err(|e| e.to_string())?)
-        } else if self.unmount && device_num.is_some() && self.mountpoint.is_some() {
-            return Err("Only specify either --device or mountpoint on unmount".to_string());
-        } else {
-            None
-        };
-
-        // Get String version of the mountpoint - we do this here as we'll
-        // need it to serialize later (can't serialize a PathBuf)
-        let mountpoint_str = match mountpoint {
-            Some(ref path) => Some(
-                path.to_str()
-                    .ok_or_else(|| format!("Invalid UTF-8 in path: {}", path.display()))?
-                    .to_string(),
-            ),
-            None => None,
-        };
-
-        Ok(ValidatedArgs {
-            device: device_num,
-            dummy_formats: self.dummy_formats,
-            bus_reset: self.bus_reset,
-            mount: self.mount,
-            unmount: self.unmount,
-            mountpoint: mountpoint,
-            mountpoint_str: mountpoint_str,
-            kill: self.kill,
-        })
+        Ok(self)
     }
 }
 
@@ -219,395 +200,246 @@ impl std::fmt::Display for TestError {
 
 #[cfg(test)]
 // Helper function to convert String errors to our TestError type
-fn validate_for_test(args: Args) -> Result<ValidatedArgs, TestError> {
+fn validate_for_test(args: Args) -> Result<Args, TestError> {
     args.validate().map_err(TestError)
 }
 
 #[test]
-fn test_default_device_number() {
+fn test_default_mount_device_number() {
     let temp_dir = setup_test_dir();
-    let mount_path = temp_dir.path().to_path_buf();
+    let mount_path = temp_dir.path().to_str().unwrap().to_string();
 
     let args = Args {
-        device: None,
-        dummy_formats: false,
-        bus_reset: false,
-        mount: true,
-        unmount: false,
-        mountpoint: Some(mount_path),
-        help: None,
-        kill: kill,
+        operation: ClientOperation::Mount {
+            device: DEFAULT_DEVICE_NUM,
+            dummy_formats: false,
+            mountpoint: mount_path,
+            path: None,
+        },
     };
 
     let validated = validate_for_test(args).unwrap();
-    assert_eq!(validated.device, Some(DEFAULT_DEVICE_NUM));
+    match validated.operation {
+        ClientOperation::Mount { device, .. } => {
+            assert_eq!(device, DEFAULT_DEVICE_NUM);
+        }
+        _ => panic!("Wrong operation type"),
+    }
 }
 
 #[test]
 fn test_valid_device_numbers() {
     let temp_dir = setup_test_dir();
-    let mount_path = temp_dir.path().to_path_buf();
+    let mount_path = temp_dir.path().to_str().unwrap().to_string();
 
     for device in MIN_DEVICE_NUM..=MAX_DEVICE_NUM {
         let args = Args {
-            device: Some(device),
-            dummy_formats: false,
-            bus_reset: false,
-            mount: true,
-            unmount: false,
-            mountpoint: Some(mount_path.clone()),
-            help: None,
-            kill: kill,
+            operation: ClientOperation::Mount {
+                device,
+                dummy_formats: false,
+                mountpoint: mount_path.clone(),
+                path: None,
+            },
         };
 
         let validated = validate_for_test(args).unwrap();
-        assert_eq!(validated.device, Some(device));
+        match validated.operation {
+            ClientOperation::Mount { device: validated_device, .. } => {
+                assert_eq!(validated_device, device);
+            }
+            _ => panic!("Wrong operation type"),
+        }
     }
 }
 
 #[test]
 fn test_invalid_device_numbers() {
     let temp_dir = setup_test_dir();
-    let mount_path = temp_dir.path().to_path_buf();
+    let mount_path = temp_dir.path().to_str().unwrap().to_string();
 
     // Test below minimum
     let args = Args {
-        device: Some(MIN_DEVICE_NUM - 1),
-        dummy_formats: false,
-        bus_reset: false,
-        mount: true,
-        unmount: false,
-        mountpoint: Some(mount_path.clone()),
-        help: None,
-        kill: kill,
+        operation: ClientOperation::Mount {
+            device: MIN_DEVICE_NUM - 1,
+            dummy_formats: false,
+            mountpoint: mount_path.clone(),
+            path: None,
+        },
     };
     assert!(validate_for_test(args).is_err());
 
     // Test above maximum
     let args = Args {
-        device: Some(MAX_DEVICE_NUM + 1),
-        dummy_formats: false,
-        bus_reset: false,
-        mount: true,
-        unmount: false,
-        mountpoint: Some(mount_path),
-        help: None,
-        kill: kill,
+        operation: ClientOperation::Mount {
+            device: MAX_DEVICE_NUM + 1,
+            dummy_formats: false,
+            mountpoint: mount_path,
+            path: None,
+        },
     };
     assert!(validate_for_test(args).is_err());
 }
 
 #[test]
-fn test_mount_unmount_exclusivity() {
+fn test_unmount_device_or_mountpoint() {
     let temp_dir = setup_test_dir();
-    let mount_path = temp_dir.path().to_path_buf();
+    let mount_path = temp_dir.path().to_str().unwrap().to_string();
 
+    // Test with both device and mountpoint (should fail)
     let args = Args {
-        device: None,
-        dummy_formats: false,
-        bus_reset: false,
-        mount: true,
-        unmount: true,
-        mountpoint: Some(mount_path),
-        help: None,
-        kill: kill,
+        operation: ClientOperation::Unmount {
+            device: Some(DEFAULT_DEVICE_NUM),
+            mountpoint: Some(mount_path.clone()),
+            path: None,
+        },
     };
-
     let result = validate_for_test(args);
     assert!(result.is_err());
     assert_eq!(
         result.unwrap_err(),
-        "Cannot perform both mount and unmount simultaneously"
+        "Only specify --device or mountpoint on unmount"
     );
-}
 
-#[test]
-fn test_mountpoint_required_for_mount() {
+    // Test with only device (should succeed)
     let args = Args {
-        device: None,
-        dummy_formats: false,
-        bus_reset: false,
-        mount: true,
-        unmount: false,
-        mountpoint: None,
-        help: None,
-        kill: kill,
+        operation: ClientOperation::Unmount {
+            device: Some(DEFAULT_DEVICE_NUM),
+            mountpoint: None,
+            path: None,
+        },
     };
+    assert!(validate_for_test(args).is_ok());
 
-    let result = validate_for_test(args);
-    assert!(result.is_err());
-    assert_eq!(result.unwrap_err(), "No mountpoint specified");
-}
-
-#[test]
-fn test_mountpoint_required_for_unmount() {
+    // Test with only mountpoint (should succeed)
     let args = Args {
-        device: None,
-        dummy_formats: false,
-        bus_reset: false,
-        mount: false,
-        unmount: true,
-        mountpoint: None,
-        help: None,
-        kill: kill,
+        operation: ClientOperation::Unmount {
+            device: None,
+            mountpoint: Some(mount_path),
+            path: None,
+        },
     };
-
-    let result = validate_for_test(args);
-    assert!(result.is_err());
-    assert_eq!(result.unwrap_err(), "No mountpoint specified");
+    assert!(validate_for_test(args).is_ok());
 }
 
 #[test]
-fn test_only_device_num_or_mountpoint_required_for_unmount() {
+fn test_identify_device_validation() {
+    // Test valid device number
+    let args = Args {
+        operation: ClientOperation::Identify {
+            device: DEFAULT_DEVICE_NUM,
+        },
+    };
+    assert!(validate_for_test(args).is_ok());
+
+    // Test invalid device number
+    let args = Args {
+        operation: ClientOperation::Identify {
+            device: MAX_DEVICE_NUM + 1,
+        },
+    };
+    assert!(validate_for_test(args).is_err());
+}
+
+#[test]
+fn test_resetbus_and_kill_no_validation() {
+    // Test resetbus (should always succeed)
+    let args = Args {
+        operation: ClientOperation::Resetbus,
+    };
+    assert!(validate_for_test(args).is_ok());
+
+    // Test kill (should always succeed)
+    let args = Args {
+        operation: ClientOperation::Kill,
+    };
+    assert!(validate_for_test(args).is_ok());
+}
+
+#[test]
+fn test_mount_path_validation() {
     let temp_dir = setup_test_dir();
-    let mount_path = temp_dir.path().to_path_buf();
+    let mount_path = temp_dir.path().to_str().unwrap().to_string();
 
+    // Test valid mountpoint
     let args = Args {
-        device: Some(DEFAULT_DEVICE_NUM),
-        dummy_formats: false,
-        bus_reset: false,
-        mount: false,
-        unmount: true,
-        mountpoint: Some(mount_path.clone()),
-        help: None,
-        kill: kill,
+        operation: ClientOperation::Mount {
+            device: DEFAULT_DEVICE_NUM,
+            dummy_formats: false,
+            mountpoint: mount_path,
+            path: None,
+        },
     };
+    assert!(validate_for_test(args).is_ok());
 
-    let result = validate_for_test(args);
-    assert!(result.is_err());
-    assert_eq!(
-        result.unwrap_err(),
-        "Only specify either --device or mountpoint on unmount"
-    );
+    // Test nonexistent mountpoint
+    let args = Args {
+        operation: ClientOperation::Mount {
+            device: DEFAULT_DEVICE_NUM,
+            dummy_formats: false,
+            mountpoint: "/this/path/does/not/exist".to_string(),
+            path: None,
+        },
+    };
+    assert!(validate_for_test(args).is_err());
 }
 
 #[test]
-fn test_only_device_num_unmount() {
-    let args = Args {
-        device: Some(DEFAULT_DEVICE_NUM),
-        dummy_formats: false,
-        bus_reset: false,
-        mount: false,
-        unmount: true,
-        mountpoint: None,
-        help: None,
-        kill: kill,
-    };
-
-    assert!(!validate_for_test(args).is_err());
-}
-
-#[test]
-fn test_only_mountpoint_unmount() {
-    let temp_dir = setup_test_dir();
-    let mount_path = temp_dir.path().to_path_buf();
-
-    let args = Args {
-        device: None,
-        dummy_formats: false,
-        bus_reset: false,
-        mount: false,
-        unmount: true,
-        mountpoint: Some(mount_path.clone()),
-        help: None,
-        kill: kill,
-    };
-
-    assert!(!validate_for_test(args).is_err());
-}
-
-#[test]
-fn test_bus_reset_restrictions_device_none() {
-    let args = Args {
-        device: None,
-        dummy_formats: true,
-        bus_reset: true,
-        mount: false,
-        unmount: false,
-        mountpoint: None,
-        help: None,
-        kill: kill,
-    };
-
-    let result = validate_for_test(args);
-    let err = result.unwrap_err();
-    assert!(err.0.contains("--dummy-formats is only valid on mounts"));
-}
-
-#[test]
-fn test_bus_reset_restrictions_with_device() {
-    let args = Args {
-        device: Some(DEFAULT_DEVICE_NUM),
-        dummy_formats: false,
-        bus_reset: true,
-        mount: false,
-        unmount: false,
-        mountpoint: None,
-        help: None,
-        kill: kill,
-    };
-
-    let result = validate_for_test(args);
-    let err = result.unwrap_err();
-    assert!(err
-        .0
-        .contains("--device is only valid on mounts and unmounts"));
-}
-
-#[test]
-fn test_valid_mountpoint() {
-    let temp_dir = setup_test_dir();
-    let mount_path = temp_dir.path().to_path_buf();
-
-    let args = Args {
-        device: None,
-        dummy_formats: false,
-        bus_reset: false,
-        mount: true,
-        unmount: false,
-        mountpoint: Some(mount_path.clone()),
-        help: None,
-        kill: kill,
-    };
-
-    let validated = validate_for_test(args).unwrap();
-    assert_eq!(validated.mountpoint.unwrap(), mount_path);
-}
-
-#[test]
-fn test_mountpoint_string_conversion() {
-    let temp_dir = setup_test_dir();
-    let mount_path = temp_dir.path().to_path_buf();
-    let mount_str = mount_path.to_str().unwrap().to_string();
-
-    let args = Args {
-        device: None,
-        dummy_formats: false,
-        bus_reset: false,
-        mount: true,
-        unmount: false,
-        mountpoint: Some(mount_path),
-        help: None,
-        kill: kill,
-    };
-
-    let validated = validate_for_test(args).unwrap();
-    assert_eq!(validated.mountpoint_str.unwrap(), mount_str);
-}
-
-#[test]
-fn test_dummy_formats_flag() {
-    let temp_dir = setup_test_dir();
-    let mount_path = temp_dir.path().to_path_buf();
-
-    let args = Args {
-        device: None,
-        dummy_formats: true,
-        bus_reset: false,
-        mount: true,
-        unmount: false,
-        mountpoint: Some(mount_path),
-        help: None,
-        kill: kill,
-    };
-
-    let validated = validate_for_test(args).unwrap();
-    assert!(validated.dummy_formats);
-}
-
-#[test]
-fn test_no_operation_specified() {
-    let args = Args {
-        device: None,
-        dummy_formats: false,
-        bus_reset: false,
-        mount: false,
-        unmount: false,
-        mountpoint: None,
-        help: None,
-        kill: kill,
-    };
-
-    let result = validate_for_test(args);
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert_eq!(
-        err.0,
-        "No operation specified. Use --mount, --unmount, or --bus-reset"
-    );
-}
-
-#[test]
-fn test_nonexistent_mountpoint() {
-    let args = Args {
-        device: None,
-        dummy_formats: false,
-        bus_reset: false,
-        mount: true,
-        unmount: false,
-        mountpoint: Some(PathBuf::from("/this/path/does/not/exist")),
-        help: None,
-        kill: kill,
-    };
-
-    let result = validate_for_test(args);
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(err
-        .0
-        .contains("Mountpoint /this/path/does/not/exist is not a directory"));
-}
-
-#[test]
-fn test_non_writable_mountpoint() {
+fn test_mount_permissions() {
     use std::fs::{self, Permissions};
     use std::os::unix::fs::PermissionsExt;
 
-    // Create a temporary directory
     let temp_dir = setup_test_dir();
-    let mount_path = temp_dir.path().to_path_buf();
+    let mount_path = temp_dir.path().to_str().unwrap().to_string();
 
     // Remove write permissions
-    fs::set_permissions(&mount_path, Permissions::from_mode(0o444))
+    fs::set_permissions(temp_dir.path(), Permissions::from_mode(0o444))
         .expect("Failed to set permissions");
 
     let args = Args {
-        device: None,
-        dummy_formats: false,
-        bus_reset: false,
-        mount: true,
-        unmount: false,
-        mountpoint: Some(mount_path.clone()),
-        help: None,
-        kill: kill,
+        operation: ClientOperation::Mount {
+            device: DEFAULT_DEVICE_NUM,
+            dummy_formats: false,
+            mountpoint: mount_path,
+            path: None,
+        },
     };
 
     let result = validate_for_test(args);
     assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(err.0.contains("No write permission for mountpoint"));
+    assert!(result.unwrap_err().0.contains("No write permission for mountpoint"));
 
-    // Restore write permissions for cleanup
-    fs::set_permissions(&mount_path, Permissions::from_mode(0o755))
+    // Restore permissions for cleanup
+    fs::set_permissions(temp_dir.path(), Permissions::from_mode(0o755))
         .expect("Failed to restore permissions");
 }
 
 #[test]
-fn test_validated_args_log() {
+fn test_operation_logging() {
     let temp_dir = setup_test_dir();
-    let mount_path = temp_dir.path().to_path_buf();
-    let mount_str = mount_path.to_str().unwrap().to_string();
+    let mount_path = temp_dir.path().to_str().unwrap().to_string();
 
-    let validated = ValidatedArgs {
-        device: Some(DEFAULT_DEVICE_NUM),
-        dummy_formats: true,
-        bus_reset: true,
-        mount: true,
-        unmount: false,
-        mountpoint: Some(mount_path),
-        mountpoint_str: Some(mount_str),
-    };
+    // Test logging for each operation type
+    let operations = vec![
+        ClientOperation::Resetbus,
+        ClientOperation::Mount {
+            device: DEFAULT_DEVICE_NUM,
+            dummy_formats: false,
+            mountpoint: mount_path.clone(),
+            path: None,
+        },
+        ClientOperation::Unmount {
+            device: Some(DEFAULT_DEVICE_NUM),
+            mountpoint: None,
+            path: None,
+        },
+        ClientOperation::Identify {
+            device: DEFAULT_DEVICE_NUM,
+        },
+        ClientOperation::Kill,
+    ];
 
-    // This test mainly ensures the log method doesn't panic
-    validated.log();
+    for operation in operations {
+        // This just ensures logging doesn't panic
+        operation.log();
+    }
 }

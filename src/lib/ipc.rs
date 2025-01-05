@@ -20,6 +20,9 @@ pub enum Request {
     BusReset,
     Ping,
     Die,
+    Identify {
+        device: u8,
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -30,4 +33,8 @@ pub enum Response {
     Error(String),
     Pong,
     Dying,
+    Identified {
+        name: String,
+        description: String,
+    }
 }

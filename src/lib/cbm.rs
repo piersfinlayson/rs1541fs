@@ -43,4 +43,13 @@ impl Cbm {
         cbm.reset().map_err(|e| e.to_string())?;
         Ok(())
     }
+
+    pub fn identify(&self, device: u8) -> CbmResult<()> {
+        let cbm = self
+            .handle
+            .lock()
+            .map_err(|_| "Failed to acquire Cbm lock".to_string())?;
+        cbm.identify(device).map_err(|e| e.to_string())?;
+        Ok(())
+    }
 }

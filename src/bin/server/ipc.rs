@@ -154,20 +154,18 @@ fn handle_unmount(mountpoint: Option<String>, device: Option<u8>) -> Response {
 fn handle_bus_reset(cbm: Arc<Mutex<Cbm>>) -> Response {
     info!("Request: Bus reset");
 
-    let result = cbm.lock()
+    let result = cbm
+        .lock()
         .map_err(|e| format!("Failed to acquire cbm lock {}", e))
         .and_then(|mutex| mutex.reset_bus())
-        .map_or_else(
-            |e| Response::Error(e),
-            |_| Response::BusResetSuccess,
-        );
-    
+        .map_or_else(|e| Response::Error(e), |_| Response::BusResetSuccess);
+
     match &result {
         Response::BusResetSuccess => debug!("Bus reset completed successfully"),
         Response::Error(e) => debug!("Bus reset failed: {}", e),
         _ => unreachable!(),
     }
-    
+
     result
 }
 
