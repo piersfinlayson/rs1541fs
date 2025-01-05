@@ -46,6 +46,13 @@ pub enum ClientOperation {
         device: u8,
     },
 
+    /// Get status of the selected device
+    Getstatus {
+        /// Device number (default: 8)
+        #[arg(short = 'd', long = "device", default_value = "8")]
+        device: u8,
+    },
+
     /// Kill the 1541fs daemon (1541fsd)
     Kill,
 }
@@ -89,6 +96,9 @@ impl ClientOperation {
             }
             ClientOperation::Identify { device } => {
                 debug!("Operation: Identify device {}", device);
+            }
+            ClientOperation::Getstatus { device } => {
+                debug!("Operation: Get status of device {}", device);
             }
             ClientOperation::Kill => {
                 debug!("Operation: Kill daemon");
@@ -152,6 +162,10 @@ impl Args {
                 }
             }
             ClientOperation::Identify { device } => {
+                // Check the device number - this is required
+                validate_device(Some(*device), DeviceValidation::Required)?;
+            }
+            ClientOperation::Getstatus { device } => {
                 // Check the device number - this is required
                 validate_device(Some(*device), DeviceValidation::Required)?;
             }

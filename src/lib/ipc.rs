@@ -23,6 +23,9 @@ pub enum Request {
     Identify {
         device: u8,
     },
+    GetStatus {
+        device: u8,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -36,5 +39,8 @@ pub enum Response {
     Identified {
         device_type: String,
         description: String,
+    },
+    GotStatus {
+        status: String,
     },
 }

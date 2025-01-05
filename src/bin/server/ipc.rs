@@ -45,6 +45,7 @@ fn handle_client_request(cbm: Arc<Mutex<Cbm>>, stream: &mut UnixStream) -> Resul
         Request::Ping => handle_ping(),
         Request::Die => handle_die(),
         Request::Identify { device } => handle_identify(cbm, device),
+        Request::GetStatus { device } => handle_get_status(cbm, device),
     };
 
     match send_response(stream, response) {
@@ -206,6 +207,27 @@ fn handle_identify(cbm: Arc<Mutex<Cbm>>, device: u8) -> Response {
             )
         }
         Response::Error(e) => debug!("Identify failed: {}", e),
+        _ => unreachable!(),
+    }
+
+    result
+}
+
+fn handle_get_status(cbm: Arc<Mutex<Cbm>>, device: u8) -> Response {
+    info!("Request: GetStatus");
+
+    let result = cbm
+        .lock()
+        .map_err(|e| format!("Failed to acquire cbm lock {}", e))
+        .and_then(|mutex| mutex.get_status(device))
+        .map(|status| Response::GotStatus { status })
+        .unwrap_or_else(|e| Response::Error(e));
+
+    match &result {
+        Response::GotStatus { status } => {
+            debug!("Get status completed successfully: {:.40} (output is capped at 40 bytes)", status)
+        }
+        Response::Error(e) => debug!("Get status failed: {}", e),
         _ => unreachable!(),
     }
 

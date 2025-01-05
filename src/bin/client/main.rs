@@ -224,6 +224,7 @@ fn create_request(operation: ClientOperation) -> Request {
             device: device,
         },
         ClientOperation::Identify { device } => Request::Identify { device: device },
+        ClientOperation::Getstatus { device } => Request::GetStatus { device: device },
         ClientOperation::Resetbus => Request::BusReset,
         ClientOperation::Kill => Request::Die,
     }
@@ -261,6 +262,8 @@ fn main() -> Result<()> {
             mountpoint.unwrap_or("".to_string()),
             device.map_or(String::new(), |n| n.to_string()),
         ),
+        Request::Identify { device, .. } => (String::new(), device.to_string()),
+        Request::GetStatus { device, .. } => (String::new(), device.to_string()),
         _ => (String::new(), String::new()),
     };
 
@@ -301,9 +304,13 @@ fn main() -> Result<()> {
             description,
         } => {
             info!(
-                "Identified device as model {} description {}",
-                device_type, description
+                "Identified device {} as model {} description {}",
+                device, device_type, description
             );
+            Ok(())
+        }
+        Response::GotStatus { status } => {
+            info!("Got device {} status {}", device, status);
             Ok(())
         }
     }
@@ -499,7 +506,7 @@ fn test_response_handling() {
         (Response::Dying, false),
         (
             Response::Identified {
-                name: "Test Device".into(),
+                device_type: "Test Device".into(),
                 description: "Test Description".into(),
             },
             false,
@@ -524,5 +531,6 @@ fn handle_response(response: &Response, _request: &Request) -> Result<()> {
         Response::Pong => Ok(()),
         Response::Dying => Ok(()),
         Response::Identified { .. } => Ok(()),
+        Response::GotStatus { .. } => Ok(()),
     }
 }

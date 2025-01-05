@@ -302,7 +302,7 @@ impl OpenCbm {
     /// # Arguments
     /// * `device` - Device number to query
     /// * `buf` - Buffer to store the status string
-    pub fn _device_status(&self, device: u8, size: usize) -> OpenCbmResult<(Vec<u8>, i32)> {
+    pub fn device_status(&self, device: u8, size: usize) -> OpenCbmResult<(Vec<u8>, i32)> {
         let handle = self.handle;
         let mut buf = vec![0; size];
 
