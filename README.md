@@ -25,7 +25,7 @@ cbmctrl detect
 
 This should return nothing if you have no drives connected, otherwise a list of detect drives.
 
-See Troubleshooting below if you get errors when running cbmctrl
+See Troubleshooting below if you get errors when running cbmctrl - permission issues are common.
 
 ### clang
 
@@ -42,9 +42,55 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
 ```
 
+## Building
+
+This will build both the server (daemon) and client:
+
+```
+cargo build
+```
+
+## Running
+
+The client will automatically run the server if it isn't running, and if it can find the binary.  If you did a regular ```cargo build``` then you'll have the server (1541fsd) and also the client in the target/debug directory, so you can run the client (1541fs) like this:
+
+```
+DAEMON_PATH=target/debug RUST_LOG=info cargo run --bin 1541fs identify
+```
+
+Or you can run 1541fs directly:
+
+```
+DAEMON_PATH=target/debug RUST_LOG=info target/debug/1541fs identify
+```
+
+The identify command will attempt to identify what Commodore drive is connected to the XUM1541 bus and configured for device 8.  Sample output:
+
+```
+[INFO ] Logging intialized
+[INFO ] Daemon running and healthy
+[INFO ] Identified device 8 as model 1541 description 1540 or 1541
+```
+
+
 ## Troubleshooting
 
-If you don't have permission right you'll get:
+### Logging
+
+Use ```RUST_LOG=<log level>``` before the 1541fs command.  If you're hitting problems ```RUST_LOG=debug``` is a good bet.  If 1541fs starts 1541fsd (i.e. it wasn't already running), this log level (via this environment variable) will also be propogated to the invoked 1541fsd.
+
+1541fs logs go to stdout.
+
+1541fsd logs to syslog, so to /var/log/syslog or wherever syslog/rsyslog is configured to output.  You can put this in your ```/etc/rsyslog.conf``` if you'd like 1541fsd logs to go to ```/var/log/1541fs.log```:
+
+```
+$template CustomFormat,"%TIMESTAMP% %HOSTNAME% %syslogtag% %syslogseverity-text:::uppercase% %msg%\n"
+:programname, startswith, "1541fs" -/var/log/1541fs.log;CustomFormat
+```
+
+### XUM1541/USB device Permission Issues
+
+If you don't have XUM1541 USB permissions right on your system you'll probably get something like this:
 
 ```
 error: cannot query product name: error sending control message: Operation not permitted
@@ -54,7 +100,9 @@ error: no xum1541 device found
 cbmctrl: libusb/xum1541:: Operation not permitted
 ```
 
-It can be a bit of a pain getting permissions right for accessing the XUM1541 USB device.  If you get any kind of ```PermissionDenied``` or ```Operation not permitted``` errors I recommend replacing /etc/udev/rules.d/45-opencbm-xum1541.rules with this content:
+It can be a bit of a pain getting permissions right for accessing the XUM1541 USB device, unless you want to run everything as sudo (not recommended for security reasons).
+
+If you get any kind of ```PermissionDenied``` or ```Operation not permitted``` errors I recommend replacing /etc/udev/rules.d/45-opencbm-xum1541.rules with this content:
 
 ```
 SUBSYSTEM!="usb_device", ACTION!="add", GOTO="opencbm_rules_end"
@@ -82,5 +130,4 @@ Then reload udev rules:
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
-Then reattached your USB device and try ```cbmctrl detect" again.
-
+Then reattach your USB device (XUM1541) and try ```cbmctrl detect" again.  Until this works you're unlikely to be get rs1541fs working.
