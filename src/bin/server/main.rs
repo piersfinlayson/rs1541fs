@@ -1,6 +1,8 @@
 mod ipc;
 mod signal;
+mod args;
 
+use args::Args;
 use ipc::run_server;
 use rs1541fs::cbm::Cbm;
 use rs1541fs::logging::init_logging;
@@ -13,6 +15,7 @@ use std::fs;
 use std::panic;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use clap::Parser;
 
 fn check_pid_file() -> Result<(), std::io::Error> {
     let pid_file = get_pid_filename();
@@ -40,28 +43,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // init_logging(true, env!("CARGO_BIN_NAME").into());
     // debug!("Logging initialized");
 
-    // Daemonize - must do so before setting up our signal
-    // handler.
-    check_pid_file()?;
-    let daemonize = Daemonize::new()
-        .pid_file(get_pid_filename())
-        .chown_pid_file(true)
-        .working_directory("/tmp");
+    let args = Args::parse();
 
-    match daemonize.start() {
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("Failed to dameonize, {}", e);
-            return Err(Box::new(e));
+    if !args.foreground {
+        // Daemonize - must do so before setting up our signal
+        // handler.
+        check_pid_file()?;
+        let daemonize = Daemonize::new()
+            .pid_file(get_pid_filename())
+            .chown_pid_file(true)
+            .working_directory("/tmp");
+
+        match daemonize.start() {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("Failed to dameonize, {}", e);
+                return Err(Box::new(e));
+            }
         }
     }
 
     // Initialize logger
     // We re-do this after daemonizing so the PID used in syslog is the PID
     // of the daemon
-    init_logging(true, env!("CARGO_BIN_NAME").into());
+    init_logging(!args.std_logging, env!("CARGO_BIN_NAME").into());
     info!("----- Starting -----");
-    info!("Daemonized at pid {}", std::process::id());
+    if !args.foreground {
+        info!("Daemonized at pid {}", std::process::id());
+    }
 
     panic::set_hook(Box::new(|panic_info| {
         if let Some(location) = panic_info.location() {

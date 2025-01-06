@@ -225,7 +225,8 @@ fn handle_get_status(cbm: Arc<Mutex<Cbm>>, device: u8) -> Response {
 
     match &result {
         Response::GotStatus { status } => {
-            debug!("Get status completed successfully: {:.40} (output is capped at 40 bytes)", status)
+            debug!("Get status completed successfully: {} (output is capped at 40 bytes)", 
+            &status[..status.len().min(40)])
         }
         Response::Error(e) => debug!("Get status failed: {}", e),
         _ => unreachable!(),
