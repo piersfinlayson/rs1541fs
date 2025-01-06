@@ -8,11 +8,11 @@ Before building rs1541fs for the first time you must install the build dependenc
 
 ### OpenCBM
 
-rs1541fs relies on OpenCBM.  You must build and install OpenCBM - you can do so like this:
+rs1541fs relies on OpenCBM.  You must build and install OpenCBM.  I've made a few mods to OpenCBM to make it work more reliably so I suggest you use my form.  You can build and isntall it like this:
 
 ```
 sudo apt-get install build-essential libusb-dev cc65 linux-headers-$(uname -r)
-git clone https://github.com/OpenCBM/OpenCBM
+git clone https://github.com/piersfinlayson/OpenCBM
 cd OpemCBM
 make -f LINUX/Makefile plugin
 sudo make -f LINUX/Makefile install install-plugin
