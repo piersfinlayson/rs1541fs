@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 #[derive(Subcommand, Clone, Debug)]
 pub enum ClientOperation {
     /// Reset the IEC (or IEEE-488) bus
+    #[clap(alias = "busreset")] // also allow busreset
     Resetbus,
 
     /// Mount the filesystem
@@ -47,6 +48,7 @@ pub enum ClientOperation {
     },
 
     /// Get status of the selected device
+    #[clap(alias = "status")] // also allow status
     Getstatus {
         /// Device number (default: 8)
         #[arg(short = 'd', long = "device", default_value = "8")]
