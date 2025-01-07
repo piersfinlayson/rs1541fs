@@ -2,12 +2,9 @@ use rs1541fs::cbm::Cbm;
 use rs1541fs::ipc::{Request, Response, SOCKET_PATH};
 
 use crate::daemon::Daemon;
-use crate::mount::{
-    mount, unmount, validate_mount_request, validate_unmount_request, MountpointThreadWrapper,
-};
+use crate::mount::{mount, unmount, validate_mount_request, validate_unmount_request, Mountpoint};
 
 use anyhow::{anyhow, Result};
-use fuser::BackgroundSession;
 use log::{debug, error, info};
 use parking_lot::{MutexGuard, RwLockWriteGuard};
 use std::collections::HashMap;
@@ -52,42 +49,33 @@ fn handle_client_request(daemon: &Arc<Daemon>, stream: &mut UnixStream) -> Resul
         Request::Die => handle_die(),
         _ => {
             let cbm_guard = daemon.cbm.lock();
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                match request {
-                    Request::Identify { device } => handle_identify(&cbm_guard, device),
-                    Request::GetStatus { device } => handle_get_status(&cbm_guard, device),
-                    Request::Mount { .. } | Request::Unmount { .. } | Request::BusReset => {
-                        let mut mps_guard = daemon.mountpoints.write();
-                        // Strictly fusers_guard not required for BusReset, but I don't want to make this code even more complex!
-                        let mut fusers_guard = daemon.fusers.lock();
-                        match request {
-                            Request::Mount {
-                                mountpoint,
-                                device,
-                                dummy_formats,
-                                bus_reset,
-                            } => handle_mount(
-                                &cbm_guard,
-                                &mut mps_guard,
-                                &mut fusers_guard,
-                                mountpoint,
-                                device,
-                                dummy_formats,
-                                bus_reset,
-                            ),
-                            Request::Unmount { mountpoint, device } => handle_unmount(
-                                &cbm_guard,
-                                &mut mps_guard,
-                                &mut fusers_guard,
-                                mountpoint,
-                                device,
-                            ),
-                            Request::BusReset => handle_bus_reset(&cbm_guard, &mut mps_guard),
-                            _ => unreachable!(),
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match request {
+                Request::Identify { device } => handle_identify(&cbm_guard, device),
+                Request::GetStatus { device } => handle_get_status(&cbm_guard, device),
+                Request::Mount { .. } | Request::Unmount { .. } | Request::BusReset => {
+                    let mut mps_guard = daemon.mountpoints.write();
+                    match request {
+                        Request::Mount {
+                            mountpoint,
+                            device,
+                            dummy_formats,
+                            bus_reset,
+                        } => handle_mount(
+                            &cbm_guard,
+                            &mut mps_guard,
+                            mountpoint,
+                            device,
+                            dummy_formats,
+                            bus_reset,
+                        ),
+                        Request::Unmount { mountpoint, device } => {
+                            handle_unmount(&cbm_guard, &mut mps_guard, mountpoint, device)
                         }
+                        Request::BusReset => handle_bus_reset(&cbm_guard, &mut mps_guard),
+                        _ => unreachable!(),
                     }
-                    _ => unreachable!(),
                 }
+                _ => unreachable!(),
             }))
             .unwrap_or_else(|_| Response::Error("Internal error: handler panicked".into()))
         }
@@ -108,8 +96,7 @@ fn handle_client_request(daemon: &Arc<Daemon>, stream: &mut UnixStream) -> Resul
 
 fn handle_mount(
     cbm: &MutexGuard<Cbm>,
-    mps: &mut RwLockWriteGuard<HashMap<PathBuf, MountpointThreadWrapper>>,
-    fusers: &mut MutexGuard<HashMap<PathBuf, BackgroundSession>>,
+    mps: &mut RwLockWriteGuard<HashMap<PathBuf, Mountpoint>>,
     mountpoint: String,
     device: u8,
     dummy_formats: bool,
@@ -123,17 +110,9 @@ fn handle_mount(
         Err(e) => return Response::Error(e),
     };
 
-    let response = mount(
-        cbm,
-        mps,
-        fusers,
-        &mountpoint_path,
-        device,
-        dummy_formats,
-        bus_reset,
-    )
-    .map(|_| Response::MountSuccess)
-    .unwrap_or_else(|e| Response::Error(format!("Mount failed: {}", e)));
+    let response = mount(cbm, mps, &mountpoint_path, device, dummy_formats, bus_reset)
+        .map(|_| Response::MountSuccess)
+        .unwrap_or_else(|e| Response::Error(format!("Mount failed: {}", e)));
 
     match response {
         Response::MountSuccess => debug!("Mount completed successfully"),
@@ -146,8 +125,7 @@ fn handle_mount(
 
 fn handle_unmount(
     cbm: &MutexGuard<Cbm>,
-    mps: &mut RwLockWriteGuard<HashMap<PathBuf, MountpointThreadWrapper>>,
-    fusers: &mut MutexGuard<HashMap<PathBuf, BackgroundSession>>,
+    mps: &mut RwLockWriteGuard<HashMap<PathBuf, Mountpoint>>,
     mountpoint: Option<String>,
     device: Option<u8>,
 ) -> Response {
@@ -165,7 +143,7 @@ fn handle_unmount(
     // Get an option PathBuf
     let mountpoint_path = mountpoint.map(PathBuf::from);
 
-    let response = unmount(cbm, mps, fusers, &mountpoint_path, device)
+    let response = unmount(cbm, mps, &mountpoint_path, device)
         .map(|_| Response::UnmountSuccess)
         .unwrap_or_else(|e| Response::Error(format!("Unmount failed: {}", e)));
 
@@ -181,7 +159,7 @@ fn handle_unmount(
 // TO DO - need to mark all mountpoints that busreset happened
 fn handle_bus_reset(
     cbm: &Cbm,
-    _mps: &mut RwLockWriteGuard<HashMap<PathBuf, MountpointThreadWrapper>>,
+    _mps: &mut RwLockWriteGuard<HashMap<PathBuf, Mountpoint>>,
 ) -> Response {
     info!("Request: Bus reset");
 

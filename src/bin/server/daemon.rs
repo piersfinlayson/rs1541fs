@@ -1,6 +1,6 @@
 use rs1541fs::cbm::Cbm;
 
-use crate::mount::MountpointThreadWrapper;
+use crate::mount::Mountpoint;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -9,8 +9,6 @@ use std::sync::Arc;
 // parking_lot is used to simplify handling - there is no need to handle
 // failing to get the lock
 use parking_lot::{Mutex, RwLock};
-
-use fuser::BackgroundSession;
 
 /// Main 1541fsd data structure, storing:
 /// * libopencbm handle
@@ -25,8 +23,7 @@ use fuser::BackgroundSession;
 #[derive(Debug)]
 pub struct Daemon {
     pub cbm: Arc<Mutex<Cbm>>,
-    pub mountpoints: Arc<RwLock<HashMap<PathBuf, MountpointThreadWrapper>>>,
-    pub fusers: Arc<Mutex<HashMap<PathBuf, BackgroundSession>>>,
+    pub mountpoints: Arc<RwLock<HashMap<PathBuf, Mountpoint>>>,
 }
 
 impl Daemon {
@@ -34,7 +31,6 @@ impl Daemon {
         Ok(Self {
             cbm: Arc::new(Mutex::new(cbm)),
             mountpoints: Arc::new(RwLock::new(HashMap::new())),
-            fusers: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 }

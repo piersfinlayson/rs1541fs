@@ -13,7 +13,6 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -253,6 +252,7 @@ pub struct Mountpoint {
     mountpoint: PathBuf,
     drive_unit: Arc<RwLock<CbmDriveUnit>>,
     directory_cache: Arc<RwLock<DirectoryCache>>,
+    fuser: Option<Arc<Mutex<BackgroundSession>>>,
 }
 
 impl fmt::Display for Mountpoint {
@@ -275,6 +275,7 @@ impl Mountpoint {
                 entries: HashMap::new(),
                 last_updated: SystemTime::now(),
             })),
+            fuser: None,
         }
     }
 
@@ -285,8 +286,12 @@ impl Mountpoint {
         Ok(())
     }
 
-    pub fn mount(&self) -> Result<BackgroundSession, String> {
+    pub fn mount(&mut self) -> Result<(), String> {
         debug!("Mountpoint {} instructed to mount", self);
+
+        if self.fuser.is_some() {
+            return Err(format!("Cannot mount as we already have a fuser thread"));
+        }
 
         // Build the FUSE options
         let mut options = Vec::new();
@@ -306,25 +311,17 @@ impl Mountpoint {
         let fuser = spawn_mount2(self.clone(), self.mountpoint.clone(), &options)
             .map_err(|e| e.to_string())?;
 
-        Ok(fuser)
+        self.fuser = Some(Arc::new(Mutex::new(fuser)));
+
+        Ok(())
     }
 
-    pub fn unmount(&self) -> Result<(), String> {
+    pub fn unmount(&mut self) -> Result<(), String> {
         debug!("Mountpoint {} instructed to unmount", self);
-        //let status = Command::new("fusermount")
-        //    .arg("-u")
-        //    .arg("-z")
-        //    .arg(&self.mountpoint)
-        //    .status();
-        //let status = match status {
-        //    Ok(status) => status,
-        //    Err(e) => return Err(format!("Failed to issue unmount command {}", e)),
-        //};
-        //if status.success() {
+        // Setting fuser to None will cause the fuser BackgroundSession to
+        // drop, in turn causing fuser to exit for this mount
+        self.fuser = None;
         Ok(())
-        //} else {
-        //    Err(format!("Unmount failed: {}", status))
-        //}
     }
 
     // We use the format CbmDeviceType_dev<num>
@@ -385,23 +382,6 @@ impl Filesystem for Mountpoint {
         reply: ReplyData,
     ) {
         reply.data(b"Hello World!\n");
-    }
-}
-
-/// Wraps Mountpoint objects along with the fuser session
-/// BackgroundSession can't be cloned, so we don't include in Mountpoint
-#[derive(Debug)]
-pub struct MountpointThreadWrapper {
-    mount: Mountpoint,
-    fuser: Arc<Mutex<BackgroundSession>>,
-}
-
-impl MountpointThreadWrapper {
-    pub fn new(mount: Mountpoint, fuser: BackgroundSession) -> Self {
-        Self {
-            mount,
-            fuser: Arc::new(Mutex::new(fuser)),
-        }
     }
 }
 
@@ -486,23 +466,23 @@ pub fn validate_unmount_request<P: AsRef<Path>>(
 // we hit an error
 // TO DO - reckon this can be simplified
 fn check_new_mount<P: AsRef<Path>>(
-    mountpoints: &RwLockWriteGuard<HashMap<PathBuf, MountpointThreadWrapper>>,
+    mountpoints: &RwLockWriteGuard<HashMap<PathBuf, Mountpoint>>,
     mountpoint: P,
     device: u8,
 ) -> Result<(), String> {
     let path_ref: &Path = mountpoint.as_ref();
     let path_buf: PathBuf = PathBuf::from(path_ref);
-    let map: &HashMap<PathBuf, MountpointThreadWrapper> = mountpoints.deref();
+    let map: &HashMap<PathBuf, Mountpoint> = mountpoints.deref();
 
     if map.get(&path_buf).is_some() {
         return Err("Mountpoint already exists".to_string());
     }
 
     // Check if device already mounted somewhere
-    let existing_mount = mountpoints.values().find_map(|mpw| {
-        let drive_unit = mpw.mount.drive_unit.read();
+    let mount = mountpoints.values().find_map(|mp| {
+        let drive_unit = mp.drive_unit.read();
         if drive_unit.device_number == device {
-            Some(Ok(&mpw.mount))
+            Some(Ok(mp))
         } else {
             None
         }
@@ -510,7 +490,7 @@ fn check_new_mount<P: AsRef<Path>>(
 
     // Handle finding a mount by turning the Ok into an Err
     // existing_mount == None will just fall straight through as we want
-    if let Some(result) = existing_mount {
+    if let Some(result) = mount {
         return match result {
             Ok(mp) => Err(format!(
                 "Device {} is already mounted at mountpoint {}",
@@ -532,8 +512,7 @@ fn check_new_mount<P: AsRef<Path>>(
 /// doesn't already exist.
 pub fn mount<P: AsRef<Path>>(
     cbm: &MutexGuard<Cbm>,
-    mps: &mut RwLockWriteGuard<HashMap<PathBuf, MountpointThreadWrapper>>,
-    fusers: &mut MutexGuard<HashMap<PathBuf, BackgroundSession>>,
+    mps: &mut RwLockWriteGuard<HashMap<PathBuf, Mountpoint>>,
     mountpoint: P,
     device: u8,
     _dummy_formats: bool,
@@ -546,43 +525,39 @@ pub fn mount<P: AsRef<Path>>(
     let device_info = cbm.identify(device)?;
 
     // Create Mountpoint object
-    let mp = Mountpoint::new(
+    let mut mount = Mountpoint::new(
         &mountpoint,
         CbmDriveUnit::new(device, device_info.device_type),
     );
 
     // Mount it
-    let fuser = mp.mount()?;
+    mount.mount()?;
 
     // Insert it into the hashmap
-    let mp_wrapper = MountpointThreadWrapper::new(mp, fuser);
-    mps.insert(mountpoint.as_ref().to_path_buf(), mp_wrapper);
+    mps.insert(mountpoint.as_ref().to_path_buf(), mount);
 
     Ok(())
 }
 
 pub fn unmount(
     _cbm: &MutexGuard<Cbm>,
-    mps: &mut RwLockWriteGuard<HashMap<PathBuf, MountpointThreadWrapper>>,
-    fusers: &mut MutexGuard<HashMap<PathBuf, BackgroundSession>>,
+    mps: &mut RwLockWriteGuard<HashMap<PathBuf, Mountpoint>>,
     mountpoint: &Option<PathBuf>,
     device: Option<u8>,
 ) -> Result<(), String> {
     assert!(mountpoint.is_some() || device.is_some());
 
     // Get the mount
-    let mount = if let Some(mp) = mountpoint {
+    let mut mount = if let Some(mp) = mountpoint {
         // Get it from the mountpoint
         mps.get(mp)
             .ok_or_else(|| format!("No mount at mountpoint {:?}", mp))?
-            .mount
             .clone()
     } else {
         let device = device.expect("Unreachable code");
         mps.values()
-            .find(|mpw| mpw.mount.drive_unit.read().device_number == device)
+            .find(|mp| mp.drive_unit.read().device_number == device)
             .ok_or_else(|| "No matching device found".to_string())?
-            .mount
             .clone()
     };
 
@@ -590,11 +565,10 @@ pub fn unmount(
 
     // Unmount it
     mount.unmount()?;
-    match (mps.remove(mount.mountpoint.as_path())) {
-        Some(_) => {
-            // MountpointThreadWrapper will dropped, as will BackgroundSession
-            // for this mount, so mountpoint will automatically unmount
-        }
+
+    // Remove from hashmap
+    match mps.remove(mount.mountpoint.as_path()) {
+        Some(_) => {}
         None => warn!("Couldn't remove fuse thread as it couldn't be found"),
     };
 
