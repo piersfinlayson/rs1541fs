@@ -10,7 +10,6 @@ use ipc::run_server;
 use rs1541fs::cbm::Cbm;
 use rs1541fs::logging::init_logging;
 
-use clap::Parser;
 use daemonize::Daemonize;
 use log::{debug, error, info};
 use scopeguard::defer;
@@ -46,7 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // init_logging(true, env!("CARGO_BIN_NAME").into());
     // debug!("Logging initialized");
 
-    let args = Args::parse();
+    let args = Args::new();
 
     if !args.foreground {
         // Daemonize - must do so before setting up our signal

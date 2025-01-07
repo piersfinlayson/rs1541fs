@@ -46,11 +46,15 @@ source $HOME/.cargo/env
 
 ## fuse configuration
 
-You must modify the ```/etc/fuse.conf``` and uncomment the  ```user_allow_other``` line.
+In order to allow fuse to auto-unmount any mountpoints if the 1541fs daemon crashes, you must modify the ```/etc/fuse.conf``` and uncomment the  ```user_allow_other``` line.
 
-This is so rs1541fs can set the filesystem to auto-unmount when its daemon exits (otherwise the moutpoint hangs around, and prevents the daemon from being restarted).
+This is so rs1541fs can set the filesystem to auto-unmount when its daemon exit.  Otherwise the moutpoint hangs around, and prevents the daemon from being restarted.
 
 There appears to be a bug in fuser causing this to be required: https://github.com/cberner/fuser/issues/321
+
+You can disable this function (auto-unmounting on crashing) with the --autounmount switch on 1541fsd.
+
+Note that all mountpoints will be unmounted on a clean exit of the 1541fs daemon, whether --autounmount is specified or not.  This includes SIGTERM (Ctrl-C).
 
 ## Building rs1541fs
 

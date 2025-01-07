@@ -2,11 +2,13 @@ use rs1541fs::cbm::Cbm;
 use rs1541fs::cbmtypes::CbmDeviceType;
 use rs1541fs::validate::{validate_device, validate_mountpoint, DeviceValidation};
 
+use crate::args::get_args;
+
 use fuser::{
     spawn_mount2, BackgroundSession, FileAttr, Filesystem, MountOption, ReplyAttr, ReplyData,
     ReplyDirectory, ReplyEntry, Request,
 };
-use log::{debug, warn};
+use log::{debug, info, warn};
 use parking_lot::{Mutex, MutexGuard, RwLock, RwLockWriteGuard};
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -302,10 +304,15 @@ impl Mountpoint {
         options.push(MountOption::Sync);
         options.push(MountOption::DirSync);
         options.push(MountOption::NoDev);
-        options.push(MountOption::AllowRoot);
-        options.push(MountOption::AutoUnmount);
         options.push(MountOption::FSName(self.get_fs_name()));
         options.push(MountOption::Subtype("1541fs".to_string()));
+
+        let args = get_args();
+        if args.autounmount {
+            info!("Asking FUSE to auto-unmount mounts if we crash - use -d to disable");
+            options.push(MountOption::AllowRoot);
+            options.push(MountOption::AutoUnmount);
+        }
 
         // Call fuser to mount this mountpoint
         let fuser = spawn_mount2(self.clone(), self.mountpoint.clone(), &options)
