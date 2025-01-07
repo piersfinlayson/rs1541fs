@@ -1,5 +1,5 @@
 use rs1541fs::cbm::{Cbm, CbmDriveUnit};
-use rs1541fs::validate::{validate_device, validate_mountpoint, DeviceValidation};
+use rs1541fs::validate::{validate_device, validate_mountpoint, DeviceValidation, ValidationType};
 
 use crate::args::get_args;
 
@@ -189,7 +189,7 @@ pub fn validate_mount_request<P: AsRef<Path>>(
     // Check the mountpoint passed in (converting to a path type first)
     // We want to set is_mount to true and don't want to automatically
     // canonicalize - the client should pass it in already canonicalized
-    let rpath = validate_mountpoint(mountpoint.as_ref(), true, false)?;
+    let rpath = validate_mountpoint(mountpoint.as_ref(), ValidationType::Mount, false)?;
 
     // Assert returned path is the same - cos we have said don't
     // canonicalize
@@ -226,7 +226,7 @@ pub fn validate_unmount_request<P: AsRef<Path>>(
     if mountpoint.is_some() {
         let mountpoint_str = mountpoint.as_ref().clone().unwrap();
         let path = Path::new(mountpoint_str.as_ref());
-        match validate_mountpoint(&path, false, false) {
+        match validate_mountpoint(&path, ValidationType::Unmount, false) {
             Ok(rpath) => {
                 // Assert returned path is the same - cos we have said don't
                 // canonicalize

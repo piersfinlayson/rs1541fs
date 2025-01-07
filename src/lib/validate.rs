@@ -41,9 +41,14 @@ pub fn validate_device(
     }
 }
 
+#[derive(PartialEq)] 
+pub enum ValidationType {
+    Mount,
+    Unmount,
+}
 pub fn validate_mountpoint<P: AsRef<Path>>(
     path: P,
-    is_mount: bool,
+    vtype: ValidationType,
     canonicalize: bool,
 ) -> Result<PathBuf, String> {
     let path = path.as_ref();
@@ -79,7 +84,7 @@ pub fn validate_mountpoint<P: AsRef<Path>>(
     }
 
     // Check if empty when mounting
-    if is_mount {
+    if vtype == ValidationType::Mount {
         let has_entries = fs::read_dir(&vpath)
             .map_err(|e| format!("Failed to read directory {}: {}", vpath.display(), e))?
             .next()

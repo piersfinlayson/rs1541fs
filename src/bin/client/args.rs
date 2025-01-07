@@ -1,4 +1,4 @@
-use rs1541fs::validate::{validate_device, validate_mountpoint, DeviceValidation};
+use rs1541fs::validate::{validate_device, validate_mountpoint, DeviceValidation, ValidationType};
 
 use clap::{ArgAction, Parser, Subcommand};
 use log::debug;
@@ -137,7 +137,7 @@ impl Args {
 
                 // Check the mountpoint and update path and mountpoint in
                 // case it gets canonicalized
-                let new_path = validate_mountpoint(Path::new(mountpoint), true, true)?;
+                let new_path = validate_mountpoint(Path::new(mountpoint), ValidationType::Mount, true)?;
                 *path = Some(new_path.clone());
                 *mountpoint = new_path.display().to_string();
             }
@@ -153,7 +153,7 @@ impl Args {
                 // case it gets canonicalized
                 if mountpoint.is_some() {
                     let new_path =
-                        validate_mountpoint(Path::new(mountpoint.as_ref().unwrap()), false, true)?;
+                        validate_mountpoint(Path::new(mountpoint.as_ref().unwrap()), ValidationType::Unmount, true)?;
                     *path = Some(new_path.clone());
                     *mountpoint = Some(new_path.display().to_string());
                 }
