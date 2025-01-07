@@ -44,6 +44,14 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
 ```
 
+## fuse configuration
+
+You must modify the ```/etc/fuse.conf``` and uncomment the  ```user_allow_other``` line.
+
+This is so rs1541fs can set the filesystem to auto-unmount when its daemon exits (otherwise the moutpoint hangs around, and prevents the daemon from being restarted).
+
+There appears to be a bug in fuser causing this to be required: https://github.com/cberner/fuser/issues/321
+
 ## Building rs1541fs
 
 This will build both the server (daemon) and client:

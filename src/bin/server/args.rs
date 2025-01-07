@@ -15,4 +15,4 @@ pub struct Args {
     /// Log to stdout instead of syslog
     #[arg(short = 's', long = "std", action = ArgAction::SetTrue)]
     pub std_logging: bool,
-} 
+}

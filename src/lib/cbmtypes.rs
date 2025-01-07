@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 pub struct CbmDeviceInfo {
     pub device_type: CbmDeviceType,
@@ -65,7 +66,21 @@ impl From<CbmDeviceType> for i32 {
     }
 }
 
+impl fmt::Display for CbmDeviceType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 impl CbmDeviceType {
+    pub fn to_fs_name(&self) -> String {
+        match self {
+            Self::Unknown => "Unknown".to_string(),
+            Self::FdX000 => self.as_str().to_string(),
+            _ => format!("CBM_{}", self.as_str()),
+        }
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Unknown => "Unknown Device",
@@ -82,6 +97,25 @@ impl CbmDeviceType {
             Self::Cbm8250 => "8250",
             Self::Sfd1001 => "SFD-1001",
             Self::FdX000 => "FDX000",
+        }
+    }
+
+    pub fn num_disk_drives(&self) -> u8 {
+        match self {
+            Self::Unknown => 0,
+            Self::Cbm1541 => 1,
+            Self::Cbm1570 => 1,
+            Self::Cbm1571 => 1,
+            Self::Cbm1581 => 1,
+            Self::Cbm2040 => 2,
+            Self::Cbm2031 => 1,
+            Self::Cbm3040 => 2,
+            Self::Cbm4040 => 2,
+            Self::Cbm4031 => 1,
+            Self::Cbm8050 => 2,
+            Self::Cbm8250 => 2,
+            Self::Sfd1001 => 1,
+            Self::FdX000 => 1,
         }
     }
 }

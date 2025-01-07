@@ -1,18 +1,25 @@
 use rs1541fs::cbm::Cbm;
 use rs1541fs::ipc::{Request, Response, SOCKET_PATH};
-use rs1541fs::validate::{validate_device, validate_mountpoint, DeviceValidation};
+
+use crate::daemon::Daemon;
+use crate::mount::{
+    mount, unmount, validate_mount_request, validate_unmount_request, MountpointThreadWrapper,
+};
 
 use anyhow::{anyhow, Result};
+use fuser::BackgroundSession;
 use log::{debug, error, info};
+use parking_lot::{MutexGuard, RwLockWriteGuard};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-fn handle_client_request(cbm: Arc<Mutex<Cbm>>, stream: &mut UnixStream) -> Result<()> {
+fn handle_client_request(daemon: &Arc<Daemon>, stream: &mut UnixStream) -> Result<()> {
     // Set read timeout to prevent hanging
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -33,19 +40,57 @@ fn handle_client_request(cbm: Arc<Mutex<Cbm>>, stream: &mut UnixStream) -> Resul
         }
     };
 
+    // Main IPC client request handler
+    // - Handle Ping and Die straight away (no locks required)
+    // - Lock cbm for everything else
+    // - Run everything else within a panic handler to avoid poisoning
+    // - Handle Identify and GetStatus now (which need just cbm)
+    // - Lock mountpoints for everything else
+    // - Handle remainder of Requests (which need cbm and mountpoints)
     let response = match request {
-        Request::Mount {
-            mountpoint,
-            device,
-            dummy_formats,
-            bus_reset,
-        } => handle_mount(mountpoint, device, dummy_formats, bus_reset),
-        Request::Unmount { mountpoint, device } => handle_unmount(mountpoint, device),
-        Request::BusReset => handle_bus_reset(cbm),
         Request::Ping => handle_ping(),
         Request::Die => handle_die(),
-        Request::Identify { device } => handle_identify(cbm, device),
-        Request::GetStatus { device } => handle_get_status(cbm, device),
+        _ => {
+            let cbm_guard = daemon.cbm.lock();
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match request {
+                    Request::Identify { device } => handle_identify(&cbm_guard, device),
+                    Request::GetStatus { device } => handle_get_status(&cbm_guard, device),
+                    Request::Mount { .. } | Request::Unmount { .. } | Request::BusReset => {
+                        let mut mps_guard = daemon.mountpoints.write();
+                        // Strictly fusers_guard not required for BusReset, but I don't want to make this code even more complex!
+                        let mut fusers_guard = daemon.fusers.lock();
+                        match request {
+                            Request::Mount {
+                                mountpoint,
+                                device,
+                                dummy_formats,
+                                bus_reset,
+                            } => handle_mount(
+                                &cbm_guard,
+                                &mut mps_guard,
+                                &mut fusers_guard,
+                                mountpoint,
+                                device,
+                                dummy_formats,
+                                bus_reset,
+                            ),
+                            Request::Unmount { mountpoint, device } => handle_unmount(
+                                &cbm_guard,
+                                &mut mps_guard,
+                                &mut fusers_guard,
+                                mountpoint,
+                                device,
+                            ),
+                            Request::BusReset => handle_bus_reset(&cbm_guard, &mut mps_guard),
+                            _ => unreachable!(),
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            }))
+            .unwrap_or_else(|_| Response::Error("Internal error: handler panicked".into()))
+        }
     };
 
     match send_response(stream, response) {
@@ -61,114 +106,95 @@ fn handle_client_request(cbm: Arc<Mutex<Cbm>>, stream: &mut UnixStream) -> Resul
     }
 }
 
-fn handle_mount(mountpoint: String, device: u8, dummy_formats: bool, bus_reset: bool) -> Response {
+fn handle_mount(
+    cbm: &MutexGuard<Cbm>,
+    mps: &mut RwLockWriteGuard<HashMap<PathBuf, MountpointThreadWrapper>>,
+    fusers: &mut MutexGuard<HashMap<PathBuf, BackgroundSession>>,
+    mountpoint: String,
+    device: u8,
+    dummy_formats: bool,
+    bus_reset: bool,
+) -> Response {
     info!("Request: Mount device {} at {}", device, mountpoint.clone());
 
-    // Check device num validates OK
-    // If the validation fails, return a Response:Error
-    // If it returns OK, assert that we got given the same device number - it
-    // shouldn't change if it was validate, as we are doing Required
-    // validation which doesn't return a default value, or otherwise change it
-    match validate_device(Some(device), DeviceValidation::Required) {
-        Ok(validated_device) => {
-            assert!(validated_device.is_some());
-            assert_eq!(validated_device.unwrap(), device);
-        }
+    let mountpoint_path = match validate_mount_request(mountpoint, device, dummy_formats, bus_reset)
+    {
+        Ok(path) => path,
         Err(e) => return Response::Error(e),
+    };
+
+    let response = mount(
+        cbm,
+        mps,
+        fusers,
+        &mountpoint_path,
+        device,
+        dummy_formats,
+        bus_reset,
+    )
+    .map(|_| Response::MountSuccess)
+    .unwrap_or_else(|e| Response::Error(format!("Mount failed: {}", e)));
+
+    match response {
+        Response::MountSuccess => debug!("Mount completed successfully"),
+        Response::Error(ref e) => debug!("Mount failed {}", e),
+        _ => unreachable!(),
     }
 
-    // Check the mountpoint passed in (converting to a path type first)
-    // We want to set is_mount to true and don't want to automatically
-    // canonicalize - the client should pass it in already canonicalized
-    let path = Path::new(&mountpoint);
-    match validate_mountpoint(path, true, false) {
-        Ok(rpath) => {
-            // Assert returned path is the same - cos we have said don't
-            // canonicalize
-            assert_eq!(path, rpath);
-        }
-        Err(e) => return Response::Error(e),
-    };
-
-    // No validation checking required for other args
-    if dummy_formats {
-        debug!("Dummy formatting requested")
-    };
-    if bus_reset {
-        debug!("Bus reset requested")
-    };
-
-    // TO DO - actually handle the mount
-
-    debug!("Mount completed successfully");
-    return Response::MountSuccess;
+    return response;
 }
 
-fn handle_unmount(mountpoint: Option<String>, device: Option<u8>) -> Response {
+fn handle_unmount(
+    cbm: &MutexGuard<Cbm>,
+    mps: &mut RwLockWriteGuard<HashMap<PathBuf, MountpointThreadWrapper>>,
+    fusers: &mut MutexGuard<HashMap<PathBuf, BackgroundSession>>,
+    mountpoint: Option<String>,
+    device: Option<u8>,
+) -> Response {
     info!(
         "Request: Unmount device {} or mountpoint {}",
         device.unwrap_or_default(),
         mountpoint.clone().unwrap_or_default()
     );
 
-    // Validate that at least one of mountpoint or device is Some
-    if mountpoint.is_none() && device.is_none() {
-        return Response::Error(format!("Either mountpoint or device must be specified"));
+    match validate_unmount_request(&mountpoint, device) {
+        Ok(_) => {}
+        Err(e) => return Response::Error(e),
     }
 
-    // Validate that only one of mountpoint or device is Some
-    if mountpoint.is_some() && device.is_some() {
-        return Response::Error(format!(
-            "For an unmount only one of mountpoint or device must be specified"
-        ));
-    }
+    // Get an option PathBuf
+    let mountpoint_path = mountpoint.map(PathBuf::from);
 
-    // Validate the mountpoint
-    if mountpoint.is_some() {
-        let mountpoint_str = mountpoint.unwrap();
-        let path = Path::new(&mountpoint_str);
-        match validate_mountpoint(path, false, false) {
-            Ok(rpath) => {
-                // Assert returned path is the same - cos we have said don't
-                // canonicalize
-                assert_eq!(path, rpath);
-            }
-            Err(e) => return Response::Error(e),
-        };
-    }
+    let response = unmount(cbm, mps, fusers, &mountpoint_path, device)
+        .map(|_| Response::UnmountSuccess)
+        .unwrap_or_else(|e| Response::Error(format!("Unmount failed: {}", e)));
 
-    // Validate the device
-    if device.is_some() {
-        match validate_device(device, DeviceValidation::Required) {
-            Ok(validated_device) => {
-                assert_eq!(validated_device, device);
-            }
-            Err(e) => return Response::Error(e),
-        };
-    }
-
-    // TO DO: actually handle the unmount
-
-    debug!("Unmount completed successfully");
-    return Response::UnmountSuccess;
-}
-
-fn handle_bus_reset(cbm: Arc<Mutex<Cbm>>) -> Response {
-    info!("Request: Bus reset");
-
-    let result = cbm
-        .lock()
-        .map_err(|e| format!("Failed to acquire cbm lock {}", e))
-        .and_then(|mutex| mutex.reset_bus())
-        .map_or_else(|e| Response::Error(e), |_| Response::BusResetSuccess);
-
-    match &result {
-        Response::BusResetSuccess => debug!("Bus reset completed successfully"),
-        Response::Error(e) => debug!("Bus reset failed: {}", e),
+    match response {
+        Response::UnmountSuccess => debug!("Unmount completed successfully"),
+        Response::Error(ref e) => debug!("Unmount failed {}", e),
         _ => unreachable!(),
     }
 
-    result
+    return response;
+}
+
+// TO DO - need to mark all mountpoints that busreset happened
+fn handle_bus_reset(
+    cbm: &Cbm,
+    _mps: &mut RwLockWriteGuard<HashMap<PathBuf, MountpointThreadWrapper>>,
+) -> Response {
+    info!("Request: Bus reset");
+
+    match cbm.reset_bus() {
+        Ok(_) => {
+            debug!("Bus reset completed successfully");
+            Response::BusResetSuccess
+        }
+        Err(e) => {
+            debug!("Bus reset failed: {}", e);
+            Response::Error(e)
+        }
+    }
 }
 
 fn handle_ping() -> Response {
@@ -183,50 +209,42 @@ fn handle_die() -> Response {
     Response::Dying
 }
 
-fn handle_identify(cbm: Arc<Mutex<Cbm>>, device: u8) -> Response {
+fn handle_identify(cbm: &MutexGuard<Cbm>, device: u8) -> Response {
     info!("Request: Identify");
 
-    let result = cbm
-        .lock()
-        .map_err(|e| format!("Failed to acquire cbm lock {}", e))
-        .and_then(|mutex| mutex.identify(device))
-        .map(|device_info| Response::Identified {
-            device_type: format!("{}", device_info.device_type.as_str()),
-            description: device_info.description,
-        })
-        .unwrap_or_else(|e| Response::Error(e));
-
-    match &result {
-        Response::Identified {
-            device_type,
-            description,
-        } => {
+    match cbm.identify(device) {
+        Ok(device_info) => {
             debug!(
                 "Identify completed successfully {} {}",
-                device_type, description
-            )
+                device_info.device_type.as_str(),
+                device_info.description
+            );
+            Response::Identified {
+                device_type: format!("{}", device_info.device_type.as_str()),
+                description: device_info.description,
+            }
         }
-        Response::Error(e) => debug!("Identify failed: {}", e),
-        _ => unreachable!(),
+        Err(e) => {
+            debug!("Identify failed: {}", e);
+            Response::Error(e)
+        }
     }
-
-    result
 }
 
-fn handle_get_status(cbm: Arc<Mutex<Cbm>>, device: u8) -> Response {
+fn handle_get_status(cbm: &MutexGuard<Cbm>, device: u8) -> Response {
     info!("Request: GetStatus");
 
     let result = cbm
-        .lock()
-        .map_err(|e| format!("Failed to acquire cbm lock {}", e))
-        .and_then(|mutex| mutex.get_status(device))
+        .get_status(device)
         .map(|status| Response::GotStatus { status })
         .unwrap_or_else(|e| Response::Error(e));
 
     match &result {
         Response::GotStatus { status } => {
-            debug!("Get status completed successfully: {} (output is capped at 40 bytes)", 
-            &status[..status.len().min(40)])
+            debug!(
+                "Get status completed successfully: {} (output is capped at 40 bytes)",
+                &status[..status.len().min(40)]
+            )
         }
         Response::Error(e) => debug!("Get status failed: {}", e),
         _ => unreachable!(),
@@ -272,7 +290,7 @@ fn setup_socket() -> Result<UnixListener> {
     UnixListener::bind(SOCKET_PATH).map_err(|e| anyhow!("Failed to create socket: {}", e))
 }
 
-pub fn run_server(cbm: &Arc<Mutex<Cbm>>) -> Result<()> {
+pub fn run_server(daemon: Arc<Daemon>) -> Result<()> {
     let listener = setup_socket()?;
 
     // Set socket timeout to 1 second
@@ -284,9 +302,9 @@ pub fn run_server(cbm: &Arc<Mutex<Cbm>>) -> Result<()> {
         match listener.accept() {
             Ok((mut stream, _addr)) => {
                 debug!("IPC server accepted new connection");
-                let cbm_clone = Arc::clone(cbm);
+                let daemon_clone = Arc::clone(&daemon);
                 thread::spawn(move || {
-                    if let Err(e) = handle_client_request(cbm_clone, &mut stream) {
+                    if let Err(e) = handle_client_request(&daemon_clone, &mut stream) {
                         error!("Error handling client request: {}", e);
                     }
                 });

@@ -41,8 +41,8 @@ pub fn validate_device(
     }
 }
 
-pub fn validate_mountpoint(
-    path: impl AsRef<Path>,
+pub fn validate_mountpoint<P: AsRef<Path>>(
+    path: P,
     is_mount: bool,
     canonicalize: bool,
 ) -> Result<PathBuf, String> {

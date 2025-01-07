@@ -1,12 +1,16 @@
-mod ipc;
-mod signal;
 mod args;
+mod daemon;
+mod ipc;
+mod mount;
+mod signal;
 
 use args::Args;
+use daemon::Daemon;
 use ipc::run_server;
 use rs1541fs::cbm::Cbm;
 use rs1541fs::logging::init_logging;
 
+use clap::Parser;
 use daemonize::Daemonize;
 use log::{debug, error, info};
 use scopeguard::defer;
@@ -14,8 +18,7 @@ use signal::{create_signal_handler, get_pid_filename};
 use std::fs;
 use std::panic;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
-use clap::Parser;
+use std::sync::Arc;
 
 fn check_pid_file() -> Result<(), std::io::Error> {
     let pid_file = get_pid_filename();
@@ -103,10 +106,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         error_string.into()
     })?;
 
+    // Now create daemon data
+    let daemon = Arc::new(Daemon::new(cbm)?);
+
     // Start the server and loop forever listening for mount/unmount requests
     debug!("Start IPC server");
-    let shared_cbm = Arc::new(Mutex::new(cbm));
-    run_server(&shared_cbm)?;
+    run_server(daemon)?;
     debug!("IPC server exited");
 
     // Cannot explicitly drop CBM so the driver is closed at this point
