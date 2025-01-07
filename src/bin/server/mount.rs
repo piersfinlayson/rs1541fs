@@ -307,6 +307,10 @@ pub fn mount<P: AsRef<Path>>(
     // Insert it into the hashmap
     mps.insert(device, mount);
 
+    // Send I0 command
+    let cmd = "i0";
+    cbm.send_command(device, cmd).map_err(|e| format!("Error sending command {}: {:?}", cmd, e))?;
+
     Ok(())
 }
 

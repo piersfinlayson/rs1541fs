@@ -82,12 +82,27 @@ impl Cbm {
         })
     }
 
-    /// Not yet implemented
-    pub fn send_command(&self, _device: u8, _command: &str) -> CbmResult<()> {
-        let _cbm_guard = self
-            .handle
-            .lock();
-        // Implementation here
+    /// Send a command to the specified device on channel 15
+    pub fn send_command(&self, device: u8, command: &str) -> Result<(), CbmError> {
+        let cbm_guard = self.handle.lock()
+        ;
+        
+        // Allocate channel 15 for commands
+        cbm_guard.listen(device, 15).map_err(|e| CbmError::CommandError(format!("Listen failed: {}", e)))?;
+        
+        // Convert command to PETSCII and send
+        let cmd_bytes = cbm_guard.ascii_to_petscii(command);
+        let result = cbm_guard.raw_write(&cmd_bytes)
+            .map_err(|e| CbmError::CommandError(format!("Write failed: {}", e)))?;
+            
+        if result != cmd_bytes.len() as i32 {
+            return Err(CbmError::CommandError("Failed to write full command".into()));
+        }
+        
+        // Cleanup
+        cbm_guard.unlisten()
+            .map_err(|e| CbmError::CommandError(format!("Unlisten failed: {}", e)))?;
+        
         Ok(())
     }
 
