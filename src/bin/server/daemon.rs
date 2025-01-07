@@ -3,7 +3,6 @@ use rs1541fs::cbm::Cbm;
 use crate::mount::Mountpoint;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 // parking_lot is used to simplify handling - there is no need to handle
@@ -23,7 +22,7 @@ use parking_lot::{Mutex, RwLock};
 #[derive(Debug)]
 pub struct Daemon {
     pub cbm: Arc<Mutex<Cbm>>,
-    pub mountpoints: Arc<RwLock<HashMap<PathBuf, Mountpoint>>>,
+    pub mountpoints: Arc<RwLock<HashMap<u8, Mountpoint>>>,
 }
 
 impl Daemon {

@@ -96,7 +96,7 @@ fn handle_client_request(daemon: &Arc<Daemon>, stream: &mut UnixStream) -> Resul
 
 fn handle_mount(
     cbm: &MutexGuard<Cbm>,
-    mps: &mut RwLockWriteGuard<HashMap<PathBuf, Mountpoint>>,
+    mps: &mut RwLockWriteGuard<HashMap<u8, Mountpoint>>,
     mountpoint: String,
     device: u8,
     dummy_formats: bool,
@@ -110,22 +110,14 @@ fn handle_mount(
         Err(e) => return Response::Error(e),
     };
 
-    let response = mount(cbm, mps, &mountpoint_path, device, dummy_formats, bus_reset)
+    mount(cbm, mps, &mountpoint_path, device, dummy_formats, bus_reset)
         .map(|_| Response::MountSuccess)
-        .unwrap_or_else(|e| Response::Error(format!("Mount failed: {}", e)));
-
-    match response {
-        Response::MountSuccess => debug!("Mount completed successfully"),
-        Response::Error(ref e) => debug!("Mount failed {}", e),
-        _ => unreachable!(),
-    }
-
-    return response;
+        .unwrap_or_else(|e| Response::Error(format!("Mount failed: {}", e)))
 }
 
 fn handle_unmount(
     cbm: &MutexGuard<Cbm>,
-    mps: &mut RwLockWriteGuard<HashMap<PathBuf, Mountpoint>>,
+    mps: &mut RwLockWriteGuard<HashMap<u8, Mountpoint>>,
     mountpoint: Option<String>,
     device: Option<u8>,
 ) -> Response {
@@ -143,23 +135,15 @@ fn handle_unmount(
     // Get an option PathBuf
     let mountpoint_path = mountpoint.map(PathBuf::from);
 
-    let response = unmount(cbm, mps, &mountpoint_path, device)
+    unmount(cbm, mps, mountpoint_path, device)
         .map(|_| Response::UnmountSuccess)
-        .unwrap_or_else(|e| Response::Error(format!("Unmount failed: {}", e)));
-
-    match response {
-        Response::UnmountSuccess => debug!("Unmount completed successfully"),
-        Response::Error(ref e) => debug!("Unmount failed {}", e),
-        _ => unreachable!(),
-    }
-
-    return response;
+        .unwrap_or_else(|e| Response::Error(format!("Unmount failed: {}", e)))
 }
 
 // TO DO - need to mark all mountpoints that busreset happened
 fn handle_bus_reset(
     cbm: &Cbm,
-    _mps: &mut RwLockWriteGuard<HashMap<PathBuf, Mountpoint>>,
+    _mps: &mut RwLockWriteGuard<HashMap<u8, Mountpoint>>,
 ) -> Response {
     info!("Request: Bus reset");
 

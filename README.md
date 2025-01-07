@@ -148,3 +148,7 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
 Then reattach your USB device (XUM1541) and try ```cbmctrl detect" again.  Until this works you're unlikely to be get rs1541fs working.
+
+### WSL
+
+You can use WSL (WSL2 to be precise) run rs1541fs.  You must use usbipd in order to connect your XUM1541 USB device to the WSL kernel.  I've found that this stops working after a while, and the wsl instance must be shutdown and restarted in order to get it working again.

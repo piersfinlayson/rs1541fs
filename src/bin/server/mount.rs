@@ -13,7 +13,6 @@ use parking_lot::{Mutex, MutexGuard, RwLock, RwLockWriteGuard};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt;
-use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -473,39 +472,22 @@ pub fn validate_unmount_request<P: AsRef<Path>>(
 // we hit an error
 // TO DO - reckon this can be simplified
 fn check_new_mount<P: AsRef<Path>>(
-    mountpoints: &RwLockWriteGuard<HashMap<PathBuf, Mountpoint>>,
+    mountpoints: &RwLockWriteGuard<HashMap<u8, Mountpoint>>,
     mountpoint: P,
     device: u8,
 ) -> Result<(), String> {
-    let path_ref: &Path = mountpoint.as_ref();
-    let path_buf: PathBuf = PathBuf::from(path_ref);
-    let map: &HashMap<PathBuf, Mountpoint> = mountpoints.deref();
-
-    if map.get(&path_buf).is_some() {
-        return Err("Mountpoint already exists".to_string());
+    // Check if device number is already mounted
+    if mountpoints.get(&device).is_some() {
+        return Err(format!("Mountpoint for device {} already exists", device));
     }
 
-    // Check if device already mounted somewhere
-    let mount = mountpoints.values().find_map(|mp| {
-        let drive_unit = mp.drive_unit.read();
-        if drive_unit.device_number == device {
-            Some(Ok(mp))
-        } else {
-            None
-        }
-    });
-
-    // Handle finding a mount by turning the Ok into an Err
-    // existing_mount == None will just fall straight through as we want
-    if let Some(result) = mount {
-        return match result {
-            Ok(mp) => Err(format!(
-                "Device {} is already mounted at mountpoint {}",
-                device,
-                mp.mountpoint.display()
-            )),
-            Err(e) => Err(e),
-        };
+    // Check if mointpoint path is already mounted
+    if let Some(mp) = mountpoints.values().find(|mp| mp.mountpoint == mountpoint.as_ref().to_path_buf()) {
+        return Err(format!(
+            "Device {} is already mounted at mountpoint {}",
+            device,
+            mp.mountpoint.display()
+        ));
     }
 
     // No matches - return Ok(())
@@ -519,7 +501,7 @@ fn check_new_mount<P: AsRef<Path>>(
 /// doesn't already exist.
 pub fn mount<P: AsRef<Path>>(
     cbm: &MutexGuard<Cbm>,
-    mps: &mut RwLockWriteGuard<HashMap<PathBuf, Mountpoint>>,
+    mps: &mut RwLockWriteGuard<HashMap<u8, Mountpoint>>,
     mountpoint: P,
     device: u8,
     _dummy_formats: bool,
@@ -541,30 +523,30 @@ pub fn mount<P: AsRef<Path>>(
     mount.mount()?;
 
     // Insert it into the hashmap
-    mps.insert(mountpoint.as_ref().to_path_buf(), mount);
+    mps.insert(device, mount);
 
     Ok(())
 }
 
-pub fn unmount(
+pub fn unmount<P: AsRef<Path>>(
     _cbm: &MutexGuard<Cbm>,
-    mps: &mut RwLockWriteGuard<HashMap<PathBuf, Mountpoint>>,
-    mountpoint: &Option<PathBuf>,
+    mps: &mut RwLockWriteGuard<HashMap<u8, Mountpoint>>,
+    mountpoint: Option<P>,
     device: Option<u8>,
 ) -> Result<(), String> {
     assert!(mountpoint.is_some() || device.is_some());
 
     // Get the mount
-    let mut mount = if let Some(mp) = mountpoint {
+    let mut mount = if let Some(device) = device {
         // Get it from the mountpoint
-        mps.get(mp)
-            .ok_or_else(|| format!("No mount at mountpoint {:?}", mp))?
+        mps.get(&device)
+            .ok_or_else(|| format!("No matching mounted device found {}", device))?
             .clone()
     } else {
-        let device = device.expect("Unreachable code");
+        let path: PathBuf = mountpoint.expect("Unreachable code").as_ref().to_path_buf();
         mps.values()
-            .find(|mp| mp.drive_unit.read().device_number == device)
-            .ok_or_else(|| "No matching device found".to_string())?
+            .find(|mp| mp.mountpoint == path)
+            .ok_or_else(|| format!("No matching mountpoint found {:?}", path))?
             .clone()
     };
 
@@ -574,7 +556,7 @@ pub fn unmount(
     mount.unmount()?;
 
     // Remove from hashmap
-    match mps.remove(mount.mountpoint.as_path()) {
+    match mps.remove(&mount.drive_unit.read().device_number) {
         Some(_) => {}
         None => warn!("Couldn't remove fuse thread as it couldn't be found"),
     };
