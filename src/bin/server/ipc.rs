@@ -205,7 +205,7 @@ fn handle_get_status(cbm: &MutexGuard<Cbm>, device: u8) -> Response {
     let result = cbm
         .get_status(device)
         .map(|status| Response::GotStatus { status })
-        .unwrap_or_else(|e| Response::Error(e));
+        .unwrap_or_else(|e| Response::Error(format!("{:?}", e)));
 
     match &result {
         Response::GotStatus { status } => {

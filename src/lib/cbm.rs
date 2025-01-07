@@ -68,6 +68,80 @@ impl CbmError {
     }
 }
 
+impl fmt::Display for CbmError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CbmError::DeviceError(msg) => write!(f, "Device error: {}", msg),
+            CbmError::ChannelError(msg) => write!(f, "Channel error: {}", msg),
+            CbmError::FileError(msg) => write!(f, "File operation error: {}", msg),
+            CbmError::CommandError(msg) => write!(f, "Command error: {}", msg),
+            CbmError::FormatError(msg) => write!(f, "Format error: {}", msg),
+            CbmError::TimeoutError => write!(f, "Operation timed out"),
+            CbmError::InvalidOperation(msg) => write!(f, "Invalid operation: {}", msg),
+            CbmError::OpenCbmError(e) => write!(f, "OpenCBM error: {}", e),
+            CbmError::FuseError(errno) => {
+                let msg = match *errno {
+                    libc::EBUSY => "Device or resource busy",
+                    libc::EIO => "Input/output error",
+                    libc::ENOENT => "No such file or directory",
+                    libc::ENOSPC => "No space left on device",
+                    libc::ENOTSUP => "Operation not supported",
+                    _ => "Unknown error"
+                };
+                write!(f, "Filesystem error ({}): {}", errno, msg)
+            }
+        }
+    }
+}
+
+// Implement std::error::Error for more complete error handling
+impl std::error::Error for CbmError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            CbmError::OpenCbmError(e) => Some(e),
+            _ => None
+        }
+    }
+}
+
+// File types supported by CBM drives
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CbmFileType {
+    PRG,  // Program file
+    SEQ,  // Sequential file
+    USR,  // User file
+    REL,  // Relative file
+}
+
+// File open modes
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CbmFileMode {
+    Read,
+    Write,
+    Append,
+}
+
+impl CbmFileType {
+    fn to_suffix(&self) -> &'static str {
+        match self {
+            CbmFileType::PRG => ",P",
+            CbmFileType::SEQ => ",S", 
+            CbmFileType::USR => ",U",
+            CbmFileType::REL => ",R",
+        }
+    }
+}
+
+impl CbmFileMode {
+    fn to_suffix(&self) -> &'static str {
+        match self {
+            CbmFileMode::Read => "",
+            CbmFileMode::Write => ",W",
+            CbmFileMode::Append => ",A",
+        }
+    }
+}
+
 pub type CbmResult<T> = std::result::Result<T, String>;
 
 impl Cbm {
@@ -80,30 +154,6 @@ impl Cbm {
         Ok(Self {
             handle: Mutex::new(cbm),
         })
-    }
-
-    /// Send a command to the specified device on channel 15
-    pub fn send_command(&self, device: u8, command: &str) -> Result<(), CbmError> {
-        let cbm_guard = self.handle.lock()
-        ;
-        
-        // Allocate channel 15 for commands
-        cbm_guard.listen(device, 15).map_err(|e| CbmError::CommandError(format!("Listen failed: {}", e)))?;
-        
-        // Convert command to PETSCII and send
-        let cmd_bytes = cbm_guard.ascii_to_petscii(command);
-        let result = cbm_guard.raw_write(&cmd_bytes)
-            .map_err(|e| CbmError::CommandError(format!("Write failed: {}", e)))?;
-            
-        if result != cmd_bytes.len() as i32 {
-            return Err(CbmError::CommandError("Failed to write full command".into()));
-        }
-        
-        // Cleanup
-        cbm_guard.unlisten()
-            .map_err(|e| CbmError::CommandError(format!("Unlisten failed: {}", e)))?;
-        
-        Ok(())
     }
 
     /// Reset the entire bus
@@ -123,7 +173,7 @@ impl Cbm {
         Ok(device_info)
     }
 
-    pub fn get_status(&self, device: u8) -> CbmResult<String> {
+    pub fn get_status(&self, device: u8) -> Result<String, CbmError> {
         let cbm_guard = self
             .handle
             .lock();
@@ -131,10 +181,10 @@ impl Cbm {
         // Try and capture 256 bytes.  We won't get that many - cbmctrl only
         // passes a 40 char buf in.  However, I suspect some drives may
         // return multi line statuses.
-        let (buf, result) = cbm_guard.device_status(device, 256).map_err(|e| e.to_string())?;
+        let (buf, result) = cbm_guard.device_status(device, 256).map_err(|e| CbmError::DeviceError(e.to_string()))?;
 
         if result < 0 {
-            return Err("Failed to get device status".to_string());
+            return Err(CbmError::DeviceError(format!("Failed to get device status error {}", result)));
         }
 
         let status = String::from_utf8_lossy(&buf);
@@ -167,6 +217,51 @@ impl Cbm {
 
         Ok(processed.trim().to_string())
     }
+
+    /// Send a command to the specified device on channel 15
+    pub fn send_command(&self, device: u8, command: &str) -> Result<(), CbmError> {
+        let cbm_guard = self.handle.lock()
+        ;
+        
+        // Allocate channel 15 for commands
+        cbm_guard.listen(device, 15).map_err(|e| CbmError::CommandError(format!("Listen failed: {}", e)))?;
+        
+        // Convert command to PETSCII and send
+        let cmd_bytes = cbm_guard.ascii_to_petscii(command);
+        let result = cbm_guard.raw_write(&cmd_bytes)
+            .map_err(|e| CbmError::CommandError(format!("Write failed: {}", e)))?;
+            
+        if result != cmd_bytes.len() as i32 {
+            return Err(CbmError::CommandError("Failed to write full command".into()));
+        }
+        
+        // Cleanup
+        cbm_guard.unlisten()
+            .map_err(|e| CbmError::CommandError(format!("Unlisten failed: {}", e)))?;
+        
+        Ok(())
+    }
+
+    /// Format a disk with the given name and ID
+    pub fn format_disk(&self, device: u8, name: &str, id: &str) -> Result<(), CbmError> {
+        // Validate ID length
+        if id.len() != 2 {
+            return Err(CbmError::InvalidOperation("Disk ID must be 2 characters".into()));
+        }
+
+        // Construct format command (N:name,id)
+        let cmd = format!("N0:{},{}", name, id);
+        self.send_command(device, &cmd)?;
+
+        // Check status after format
+        let status = self.get_status(device)?;
+        if !status.starts_with("00,") {
+            return Err(CbmError::FormatError(status));
+        }
+
+        Ok(())
+    }
+
 }
 
 /// FUSE file handle encoding structure

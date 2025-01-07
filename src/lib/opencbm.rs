@@ -31,6 +31,7 @@ use std::thread;
 use std::time::Duration;
 use std::sync::Arc;
 use parking_lot::Mutex;
+use std::error::Error as StdError;
 
 // How long to allow an FFI call into libopencbm to take before giving up
 const FFI_CALL_THREAD_TIMEOUT: Duration = Duration::from_secs(5);
@@ -71,6 +72,18 @@ impl std::fmt::Display for OpenCbmError {
             OpenCbmError::ThreadTimeout => write!(f, "FFI call timed out"),
             OpenCbmError::ThreadPanic => write!(f, "FFI call thread panicked"),
             OpenCbmError::Other(e) => write!(f, "{}", e),
+        }
+    }
+}
+
+impl StdError for OpenCbmError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            OpenCbmError::ConnectionError(_) => None,
+            OpenCbmError::UnknownDevice(_) => None,
+            OpenCbmError::ThreadTimeout => None,
+            OpenCbmError::ThreadPanic => None,
+            OpenCbmError::Other(_) => None,
         }
     }
 }

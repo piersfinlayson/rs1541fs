@@ -183,12 +183,12 @@ fn test_validate_mountpoint_absolute_path() {
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().to_path_buf();
 
-    assert!(matches!(validate_mountpoint(&path, true, false), Ok(_)));
+    assert!(matches!(validate_mountpoint(&path, ValidationType::Mount, false), Ok(_)));
 }
 
 #[test]
 fn test_validate_mountpoint_non_absolute() {
-    assert!(validate_mountpoint("./relative/path", true, false).is_err());
+    assert!(validate_mountpoint("./relative/path", ValidationType::Mount, false).is_err());
 }
 
 #[test]
@@ -197,7 +197,7 @@ fn test_validate_mountpoint_non_empty() {
     let file_path = temp_dir.path().join("test.txt");
     fs::write(&file_path, "test content").unwrap();
 
-    assert!(validate_mountpoint(temp_dir.path(), true, false).is_err());
+    assert!(validate_mountpoint(temp_dir.path(), ValidationType::Mount, false).is_err());
 }
 
 #[test]
@@ -206,7 +206,7 @@ fn test_validate_mountpoint_not_directory() {
     let file_path = temp_dir.path().join("test.txt");
     fs::write(&file_path, "test content").unwrap();
 
-    assert!(validate_mountpoint(&file_path, true, false).is_err());
+    assert!(validate_mountpoint(&file_path, ValidationType::Mount, false).is_err());
 }
 
 #[test]
@@ -215,7 +215,7 @@ fn test_validate_mountpoint_canonicalize() {
     let path = temp_dir.path().join("test");
     fs::create_dir(&path).unwrap();
 
-    assert!(matches!(validate_mountpoint(&path, true, true), Ok(_)));
+    assert!(matches!(validate_mountpoint(&path, ValidationType::Mount, true), Ok(_)));
 }
 
 #[test]
