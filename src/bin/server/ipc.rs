@@ -112,7 +112,10 @@ fn handle_mount(
 
     mount(cbm, mps, &mountpoint_path, device, dummy_formats, bus_reset)
         .map(|_| Response::MountSuccess)
-        .unwrap_or_else(|e| Response::Error(format!("Mount failed: {}", e)))
+        .unwrap_or_else(|e| {
+            debug!("Mount failed: {}", e);
+            Response::Error(format!("Mount failed: {}", e))
+        })
 }
 
 fn handle_unmount(
@@ -137,7 +140,10 @@ fn handle_unmount(
 
     unmount(cbm, mps, mountpoint_path, device)
         .map(|_| Response::UnmountSuccess)
-        .unwrap_or_else(|e| Response::Error(format!("Unmount failed: {}", e)))
+        .unwrap_or_else(|e| {
+            debug!("Unmount failed: {}", e);
+            Response::Error(format!("Unmount failed: {}", e))
+        })
 }
 
 // TO DO - need to mark all mountpoints that busreset happened

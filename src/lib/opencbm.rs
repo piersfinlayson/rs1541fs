@@ -29,6 +29,8 @@ use std::io::ErrorKind;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
+use std::sync::Arc;
+use parking_lot::Mutex;
 
 // How long to allow an FFI call into libopencbm to take before giving up
 const FFI_CALL_THREAD_TIMEOUT: Duration = Duration::from_secs(5);
@@ -137,13 +139,11 @@ pub type OpenCbmResult<T> = std::result::Result<T, OpenCbmError>;
 /// synchronization when accessing the hardware bus.
 impl OpenCbm {
     pub fn open() -> OpenCbmResult<OpenCbm> {
-        use std::sync::{Arc, Mutex};
-
         let handle = Arc::new(Mutex::new(0 as intptr_t));
         let handle_clone = handle.clone();
 
         let result = opencbm_thread_timeout!({
-            let mut handle_guard = handle_clone.lock().unwrap();
+            let mut handle_guard = handle_clone.lock();
             let adapter: *mut i8 = std::ptr::null_mut();
 
             match opencbm_retry!(
@@ -221,7 +221,7 @@ impl OpenCbm {
     /// To use:
     /// let buf = vec![0; size];  // Create a buffer of appropriate size
     /// let (buf, result) = opencbm.raw_read(buf)?;
-    pub fn _raw_read(&self, size: usize) -> OpenCbmResult<(Vec<u8>, i32)> {
+    pub fn raw_read(&self, size: usize) -> OpenCbmResult<(Vec<u8>, i32)> {
         let handle = self.handle;
         let mut buf = vec![0; size];
 
@@ -241,7 +241,7 @@ impl OpenCbm {
     ///
     /// # Safety
     /// The buffer must contain valid data of the specified size
-    pub fn _raw_write(&self, data: &[u8]) -> OpenCbmResult<i32> {
+    pub fn raw_write(&self, data: &[u8]) -> OpenCbmResult<i32> {
         let handle = self.handle;
         let buf = data.to_vec(); // Create owned copy
 
@@ -258,7 +258,7 @@ impl OpenCbm {
     }
 
     /// Sends a LISTEN command to a device on the CBM bus
-    pub fn _listen(&self, device: u8, secondary_address: u8) -> OpenCbmResult<i32> {
+    pub fn listen(&self, device: u8, secondary_address: u8) -> OpenCbmResult<i32> {
         let handle = self.handle;
 
         opencbm_thread_timeout!({
@@ -278,7 +278,7 @@ impl OpenCbm {
     }
 
     /// Sends an UNLISTEN command to the CBM bus
-    pub fn _unlisten(&self) -> OpenCbmResult<i32> {
+    pub fn unlisten(&self) -> OpenCbmResult<i32> {
         let handle = self.handle;
 
         opencbm_thread_timeout!({
@@ -288,7 +288,7 @@ impl OpenCbm {
     }
 
     /// Sends an UNTALK command to the CBM bus
-    pub fn _untalk(&self) -> OpenCbmResult<i32> {
+    pub fn untalk(&self) -> OpenCbmResult<i32> {
         let handle = self.handle;
 
         opencbm_thread_timeout!({
@@ -317,6 +317,58 @@ impl OpenCbm {
             };
             Ok((buf, result))
         })
+    }
+
+    /// Convert ASCII string to PETSCII
+    pub fn ascii_to_petscii(&self, input: &str) -> Vec<u8> {
+        let mut input_vec = input.as_bytes().to_vec();
+        
+        // Need to convert to *mut i8 and ensure it's null-terminated
+        input_vec.push(0); // Add null terminator
+        
+        unsafe {
+            // Call the FFI function with the correct type
+            let input_ptr = input_vec.as_mut_ptr() as *mut i8;
+            let result = cbm_ascii2petscii(input_ptr);
+            
+            // Convert the result back to a Vec<u8>
+            let mut output = Vec::new();
+            let mut current = result;
+            while !current.is_null() {
+                let byte = *current as u8;
+                if byte == 0 { break; }
+                output.push(byte);
+                current = current.add(1);
+            }
+            
+            output
+        }
+    }
+
+    /// Convert PETSCII to ASCII string
+    pub fn petscii_to_ascii(&self, input: &[u8]) -> String {
+        let mut input_vec = input.to_vec();
+        
+        // Add null terminator
+        input_vec.push(0);
+        
+        unsafe {
+            // Call the FFI function with the correct type
+            let input_ptr = input_vec.as_mut_ptr() as *mut i8;
+            let result = cbm_petscii2ascii(input_ptr);
+            
+            // Convert the result to a String
+            let mut output = Vec::new();
+            let mut current = result;
+            while !current.is_null() {
+                let byte = *current as u8;
+                if byte == 0 { break; }
+                output.push(byte);
+                current = current.add(1);
+            }
+            
+            String::from_utf8_lossy(&output).into_owned()
+        }
     }
 }
 
