@@ -2,6 +2,7 @@ use crate::opencbm::OpenCbmError;
 
 use libc::{EBUSY, EINVAL, EIO, ENOENT, ENOTSUP};
 use serde::{Deserialize, Serialize};
+use std::any::Any;
 use std::fmt;
 
 #[derive(Debug)]
@@ -26,6 +27,15 @@ pub enum CbmError {
     FuseError(i32),
     /// Used when validation fails
     ValidationError(String),
+}
+
+impl std::error::Error for CbmError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            CbmError::OpenCbmError(err) => Some(err),
+            _ => None,
+        }
+    }
 }
 
 impl From<OpenCbmError> for CbmError {
@@ -87,13 +97,32 @@ impl fmt::Display for CbmError {
     }
 }
 
-// Implement std::error::Error for more complete error handling
-impl std::error::Error for CbmError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            CbmError::OpenCbmError(e) => Some(e),
-            _ => None,
-        }
+/// Convert a panic's payload (Box<dyn Any + Send>) into our CbmError type.
+/// This allows errors from catch_unwind to automatically convert into our
+/// error type.
+///
+/// Note that it is theoretically possible other Errs will get dealt with,
+/// with this code - so keep in mind it _might_ not have been a panic depending
+/// on the situation
+impl From<Box<dyn Any + Send>> for CbmError {
+    fn from(error: Box<dyn Any + Send>) -> Self {
+        // Try to extract a readable message from the panic payload
+        let msg = if let Some(s) = error.downcast_ref::<String>() {
+            // If the panic contained a String (e.g., panic!("my message".to_string())),
+            // extract and clone it
+            s.clone()
+        } else if let Some(s) = error.downcast_ref::<&str>() {
+            // If the panic contained a string slice (e.g., panic!("literal message")),
+            // convert it to a String
+            s.to_string()
+        } else {
+            // If we can't interpret the panic payload as any kind of string,
+            // use a generic message
+            "Unknown panic".to_string()
+        };
+
+        // Wrap the extracted message in our error type
+        CbmError::DeviceError(format!("Panic in opencbm: {}", msg))
     }
 }
 

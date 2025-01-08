@@ -9,7 +9,7 @@ use fuser::{
     ReplyDirectory, ReplyEntry, Request,
 };
 use log::{debug, info, warn};
-use parking_lot::{Mutex, MutexGuard, RwLock, RwLockWriteGuard};
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt;
@@ -34,6 +34,7 @@ pub struct DirectoryCache {
 #[derive(Debug, Clone)]
 pub struct Mountpoint {
     mountpoint: PathBuf,
+    cbm: Arc<Mutex<Cbm>>,
     drive_unit: Arc<RwLock<CbmDriveUnit>>,
     directory_cache: Arc<RwLock<DirectoryCache>>,
     fuser: Option<Arc<Mutex<BackgroundSession>>>,
@@ -51,9 +52,14 @@ impl fmt::Display for Mountpoint {
 }
 
 impl Mountpoint {
-    pub fn new<P: AsRef<Path>>(mountpoint: P, drive_unit: CbmDriveUnit) -> Self {
+    pub fn new<P: AsRef<Path>>(
+        mountpoint: P,
+        cbm: Arc<Mutex<Cbm>>,
+        drive_unit: CbmDriveUnit,
+    ) -> Self {
         Self {
             mountpoint: mountpoint.as_ref().to_path_buf(),
+            cbm,
             drive_unit: Arc::new(RwLock::new(drive_unit)),
             directory_cache: Arc::new(RwLock::new(DirectoryCache {
                 entries: HashMap::new(),
@@ -70,9 +76,7 @@ impl Mountpoint {
         Ok(())
     }
 
-    pub fn mount(&mut self) -> Result<(), DaemonError> {
-        debug!("Mountpoint {} instructed to mount", self);
-
+    fn create_fuser(&mut self) -> Result<(), DaemonError> {
         if self.fuser.is_some() {
             return Err(DaemonError::ValidationError(format!(
                 "Cannot mount as we already have a fuser thread"
@@ -83,7 +87,6 @@ impl Mountpoint {
         let mut options = Vec::new();
         options.push(MountOption::RO);
         options.push(MountOption::NoSuid);
-        options.push(MountOption::NoExec);
         options.push(MountOption::NoAtime);
         options.push(MountOption::Sync);
         options.push(MountOption::DirSync);
@@ -104,6 +107,22 @@ impl Mountpoint {
         self.fuser = Some(Arc::new(Mutex::new(fuser)));
 
         Ok(())
+    }
+
+    pub fn mount(&mut self) -> Result<(), DaemonError> {
+        debug!("Mountpoint {} instructed to mount", self);
+
+        // Create the fuser thread
+        self.create_fuser()?;
+
+        // When the mount is mounted, we immediately and syncronously send an
+        // initialize command to the drive (for both drives if appropriate).
+        // While DOS 2 drives don't need an initialize command before reading
+        // the directory, there's no harm in doing so, and may reset some bad
+        // state in the drive.  We could also decide to do a soft reset of
+        // the drive at this point.
+        let mut guard = self.drive_unit.write();
+        guard.send_init(&self.cbm).map(|x| Ok(x))?
     }
 
     pub fn unmount(&mut self) -> Result<(), DaemonError> {
@@ -248,12 +267,15 @@ pub fn validate_unmount_request<P: AsRef<Path>>(
 // we hit an error
 // TO DO - reckon this can be simplified
 fn check_new_mount<P: AsRef<Path>>(
-    mountpoints: &RwLockWriteGuard<HashMap<u8, Mountpoint>>,
+    mps: &RwLock<HashMap<u8, Mountpoint>>,
     mountpoint: P,
     device: u8,
 ) -> Result<(), DaemonError> {
+    // lock mps for the whole of this function
+    let guard = mps.read();
+
     // Check if device number is already mounted
-    if mountpoints.get(&device).is_some() {
+    if guard.get(&device).is_some() {
         return Err(DaemonError::ValidationError(format!(
             "Mountpoint for device {} already exists",
             device
@@ -261,7 +283,7 @@ fn check_new_mount<P: AsRef<Path>>(
     }
 
     // Check if mointpoint path is already mounted
-    if let Some(mp) = mountpoints
+    if let Some(mp) = guard
         .values()
         .find(|mp| mp.mountpoint == mountpoint.as_ref().to_path_buf())
     {
@@ -281,23 +303,30 @@ fn check_new_mount<P: AsRef<Path>>(
 ///
 /// Before creating the Mountpoint object, this function checks that it
 /// doesn't already exist.
+///
+/// Both cbm and mps must be Arcs:
+/// * cbm will be stored in Mountpoint
+/// * mps will be mutated - and RwLock requires Arc to provide mutability
 pub fn create_mount<P: AsRef<Path>>(
-    cbm: &MutexGuard<Cbm>,
-    mps: &mut RwLockWriteGuard<HashMap<u8, Mountpoint>>,
+    cbm: Arc<Mutex<Cbm>>, // Need to pass in Arc here, as will be stored in Mountpoint
+    mps: &mut Arc<RwLock<HashMap<u8, Mountpoint>>>, // Need to pass in Arc
     mountpoint: P,
     device: u8,
     _dummy_formats: bool,
     _bus_reset: bool,
 ) -> Result<(), DaemonError> {
     // Check this will be a new mount (i.e. it doesn't alreday exist)
-    check_new_mount(mps, &mountpoint, device)?;
+    check_new_mount(&*mps, &mountpoint, device)?;
 
     // Try and identify the device using opencbm
-    let device_info = cbm.identify(device)?;
+    let guard = cbm.lock();
+    let device_info = guard.identify(device)?;
+    drop(guard); // Unnecessary but ensures guard not kept in scope by later reuse
 
     // Create Mountpoint object
     let mut mount = Mountpoint::new(
         &mountpoint,
+        cbm,
         CbmDriveUnit::new(device, device_info.device_type),
     );
 
@@ -305,18 +334,16 @@ pub fn create_mount<P: AsRef<Path>>(
     mount.mount()?;
 
     // Insert it into the hashmap
-    mps.insert(device, mount);
-
-    // Send I0 command
-    let cmd = "0";
-    cbm.send_command(device, cmd)?;
+    let mut guard = mps.write();
+    guard.insert(device, mount);
+    drop(guard);
 
     Ok(())
 }
 
 pub fn destroy_mount<P: AsRef<Path>>(
-    _cbm: &MutexGuard<Cbm>,
-    mps: &mut RwLockWriteGuard<HashMap<u8, Mountpoint>>,
+    _cbm: &Mutex<Cbm>,
+    mps: &mut Arc<RwLock<HashMap<u8, Mountpoint>>>,
     mountpoint: Option<P>,
     device: Option<u8>,
 ) -> Result<(), DaemonError> {
@@ -325,14 +352,18 @@ pub fn destroy_mount<P: AsRef<Path>>(
     // Get the mount
     let mut mount = if let Some(device) = device {
         // Get it from the mountpoint
-        mps.get(&device)
+        let guard = mps.read();
+        guard
+            .get(&device)
             .ok_or_else(|| {
                 DaemonError::ValidationError(format!("No matching mounted device found {}", device))
             })?
             .clone()
     } else {
+        let guard = mps.write();
         let path: PathBuf = mountpoint.expect("Unreachable code").as_ref().to_path_buf();
-        mps.values()
+        guard
+            .values()
             .find(|mp| mp.mountpoint == path)
             .ok_or_else(|| {
                 DaemonError::ValidationError(format!("No matching mountpoint found {:?}", path))
@@ -347,10 +378,12 @@ pub fn destroy_mount<P: AsRef<Path>>(
     mount.unmount()?;
 
     // Remove from hashmap
-    match mps.remove(&mount.drive_unit.read().device_number) {
+    let mut guard = mps.write();
+    match guard.remove(&mount.drive_unit.read().device_number) {
         Some(_) => {}
         None => warn!("Couldn't remove fuse thread as it couldn't be found"),
     };
+    drop(guard);
 
     Ok(())
 }

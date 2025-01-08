@@ -7,6 +7,7 @@ use parking_lot::Mutex;
 
 use std::collections::HashMap;
 use std::fmt;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -98,6 +99,8 @@ impl Cbm {
     /// Send a command to the specified device on channel 15
     pub fn send_command(&self, device: u8, command: &str) -> Result<(), CbmError> {
         let cbm_guard = self.handle.lock();
+
+        debug!("Send command: {}", command);
 
         // Allocate channel 15 for commands
         cbm_guard
@@ -452,12 +455,29 @@ impl CbmDriveUnit {
         }
     }
 
+    pub fn send_init(&mut self, cbm: &Arc<Mutex<Cbm>>) -> Result<(), CbmError> {
+        let guard = cbm.lock();
+
+        // First ? catches panic and maps to CbmError
+        // The catch_unwind returns the return type of this fn, so doesn't
+        // need a ?
+        catch_unwind(AssertUnwindSafe(|| {
+            self.num_disk_drives_iter().try_for_each(|ii| {
+                guard.send_command(self.device_number, format!("i{}", ii).as_ref())
+            })
+        }))?
+    }
+
     pub fn reset(&mut self) -> Result<(), CbmError> {
         self.channel_manager.lock().reset();
         Ok(())
     }
 
-    pub fn num_disk_drives(&self) {
-        self.device_type.num_disk_drives();
+    pub fn num_disk_drives(&self) -> u8 {
+        self.device_type.num_disk_drives()
+    }
+
+    pub fn num_disk_drives_iter(&self) -> impl Iterator<Item = u8> {
+        0..self.num_disk_drives()
     }
 }

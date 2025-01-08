@@ -1,5 +1,5 @@
-mod error;
 mod args;
+mod error;
 
 use args::{Args, ClientOperation};
 #[cfg(not(test))]
@@ -305,11 +305,11 @@ fn get_socket_path() -> &'static str {
 fn get_socket_path() -> String {
     use std::path::PathBuf;
     use std::sync::Mutex;
-    
+
     lazy_static::lazy_static! {
         static ref TEST_SOCKET_PATH: Mutex<PathBuf> = Mutex::new(PathBuf::from("/tmp/test.sock"));
     }
-    
+
     TEST_SOCKET_PATH
         .lock()
         .unwrap()
@@ -336,9 +336,9 @@ fn read_proc_cmdline(pid: u32) -> std::io::Result<String> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use rs1541fs::ipc::{Request, Response};
     use crate::args::ClientOperation;
     use anyhow::Result;
+    use rs1541fs::ipc::{Request, Response};
     use std::io::{Read, Write};
     use std::process::Command;
 
@@ -394,7 +394,8 @@ mod test {
 
             let envs: Vec<_> = cmd.get_envs().collect();
             assert!(envs.iter().any(|(key, value)| {
-                key.to_str().unwrap() == "TEST_VAR" && value.unwrap().to_str().unwrap() == "test_value"
+                key.to_str().unwrap() == "TEST_VAR"
+                    && value.unwrap().to_str().unwrap() == "test_value"
             }));
         }
     }

@@ -155,10 +155,10 @@ impl Args {
                         "Either --device or mountpoint must be specified for unmount"
                     )));
                 }
-            
+
                 // Rest of your existing validation:
                 validate_device(*device, DeviceValidation::Optional)?;
-            
+
                 if mountpoint.is_some() {
                     let new_path = validate_mountpoint(
                         Path::new(mountpoint.as_ref().unwrap()),
@@ -168,7 +168,7 @@ impl Args {
                     *path = Some(new_path.clone());
                     *mountpoint = Some(new_path.display().to_string());
                 }
-            
+
                 // Only device or mountpoint should be provided on unmount
                 if (*device).is_some() && (*mountpoint).is_some() {
                     return Err(ClientError::ConfigurationError(format!(
@@ -194,21 +194,21 @@ impl Args {
 
 #[cfg(test)]
 mod tests {
-    use rs1541fs::{DEFAULT_DEVICE_NUM, MAX_DEVICE_NUM, MIN_DEVICE_NUM};
-    use crate::error::ClientError;
     use crate::args::{Args, ClientOperation};
+    use crate::error::ClientError;
+    use rs1541fs::{DEFAULT_DEVICE_NUM, MAX_DEVICE_NUM, MIN_DEVICE_NUM};
     use tempfile::TempDir;
 
     // Helper function to create a temporary directory for mount point tests
     fn setup_test_dir() -> TempDir {
         TempDir::new().expect("Failed to create temp directory")
     }
-    
+
     #[derive(Debug)]
     struct TestError {
         message: String,
     }
-    
+
     impl From<ClientError> for TestError {
         fn from(e: ClientError) -> Self {
             TestError {
@@ -216,19 +216,19 @@ mod tests {
             }
         }
     }
-    
+
     impl PartialEq<&str> for TestError {
         fn eq(&self, other: &&str) -> bool {
             self.message == *other
         }
     }
-    
+
     impl std::fmt::Display for TestError {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             write!(f, "{}", self.message)
         }
     }
-    
+
     // Helper function to convert ClientError to our TestError type
     fn validate_for_test(args: Args) -> Result<Args, TestError> {
         args.validate().map_err(Into::into)
@@ -241,7 +241,7 @@ mod tests {
         fn test_default_mount_device_number() {
             let temp_dir = setup_test_dir();
             let mount_path = temp_dir.path().to_str().unwrap().to_string();
-        
+
             let args = Args {
                 operation: ClientOperation::Mount {
                     device: DEFAULT_DEVICE_NUM,
@@ -250,7 +250,7 @@ mod tests {
                     path: None,
                 },
             };
-        
+
             let validated = validate_for_test(args).unwrap();
             match validated.operation {
                 ClientOperation::Mount { device, .. } => {
@@ -259,12 +259,12 @@ mod tests {
                 _ => panic!("Wrong operation type"),
             }
         }
-        
+
         #[test]
         fn test_valid_device_numbers() {
             let temp_dir = setup_test_dir();
             let mount_path = temp_dir.path().to_str().unwrap().to_string();
-        
+
             for device in MIN_DEVICE_NUM..=MAX_DEVICE_NUM {
                 let args = Args {
                     operation: ClientOperation::Mount {
@@ -274,7 +274,7 @@ mod tests {
                         path: None,
                     },
                 };
-        
+
                 let validated = validate_for_test(args).unwrap();
                 match validated.operation {
                     ClientOperation::Mount {
@@ -287,12 +287,12 @@ mod tests {
                 }
             }
         }
-        
+
         #[test]
         fn test_invalid_device_numbers() {
             let temp_dir = setup_test_dir();
             let mount_path = temp_dir.path().to_str().unwrap().to_string();
-        
+
             // Test below minimum
             let args = Args {
                 operation: ClientOperation::Mount {
@@ -303,7 +303,7 @@ mod tests {
                 },
             };
             assert!(validate_for_test(args).is_err());
-        
+
             // Test above maximum
             let args = Args {
                 operation: ClientOperation::Mount {
@@ -325,7 +325,7 @@ mod tests {
                 },
             };
             assert!(validate_for_test(args).is_ok());
-        
+
             // Test invalid device number
             let args = Args {
                 operation: ClientOperation::Identify {
@@ -345,11 +345,11 @@ mod tests {
         fn test_mount_permissions() {
             let temp_dir = setup_test_dir();
             let mount_path = temp_dir.path().to_str().unwrap().to_string();
-        
+
             // Remove write permissions
             fs::set_permissions(temp_dir.path(), Permissions::from_mode(0o444))
                 .expect("Failed to set permissions");
-        
+
             let args = Args {
                 operation: ClientOperation::Mount {
                     device: DEFAULT_DEVICE_NUM,
@@ -358,14 +358,14 @@ mod tests {
                     path: None,
                 },
             };
-        
+
             let result = validate_for_test(args);
             assert!(result.is_err());
             assert!(result
                 .unwrap_err()
                 .to_string()
                 .contains("No write permission for mountpoint"));
-        
+
             // Restore permissions for cleanup
             fs::set_permissions(temp_dir.path(), Permissions::from_mode(0o755))
                 .expect("Failed to restore permissions");
@@ -375,7 +375,7 @@ mod tests {
         fn test_mount_path_validation() {
             let temp_dir = setup_test_dir();
             let mount_path = temp_dir.path().to_str().unwrap().to_string();
-        
+
             // Test valid mountpoint
             let args = Args {
                 operation: ClientOperation::Mount {
@@ -386,7 +386,7 @@ mod tests {
                 },
             };
             assert!(validate_for_test(args).is_ok());
-        
+
             // Test nonexistent mountpoint
             let args = Args {
                 operation: ClientOperation::Mount {
@@ -407,7 +407,7 @@ mod tests {
         fn test_unmount_device_or_mountpoint() {
             let temp_dir = setup_test_dir();
             let mount_path = temp_dir.path().to_str().unwrap().to_string();
-        
+
             // Test with both device and mountpoint (should fail)
             let args = Args {
                 operation: ClientOperation::Unmount {
@@ -422,7 +422,7 @@ mod tests {
                 result.unwrap_err(),
                 "Configuration error: Only specify --device or mountpoint on unmount"
             );
-        
+
             // Test with only device (should succeed)
             let args = Args {
                 operation: ClientOperation::Unmount {
@@ -432,7 +432,7 @@ mod tests {
                 },
             };
             assert!(validate_for_test(args).is_ok());
-        
+
             // Test with only mountpoint (should succeed)
             let args = Args {
                 operation: ClientOperation::Unmount {
@@ -490,7 +490,7 @@ mod tests {
                 operation: ClientOperation::Resetbus,
             };
             assert!(validate_for_test(args).is_ok());
-        
+
             // Test kill (should always succeed)
             let args = Args {
                 operation: ClientOperation::Kill,
@@ -506,7 +506,7 @@ mod tests {
         fn test_operation_logging() {
             let temp_dir = setup_test_dir();
             let mount_path = temp_dir.path().to_str().unwrap().to_string();
-        
+
             // Test logging for each operation type
             let operations = vec![
                 ClientOperation::Resetbus,
@@ -526,7 +526,7 @@ mod tests {
                 },
                 ClientOperation::Kill,
             ];
-        
+
             for operation in operations {
                 // This just ensures logging doesn't panic
                 operation.log();

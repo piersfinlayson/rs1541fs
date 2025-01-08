@@ -9,7 +9,7 @@ use crate::mount::{
 
 use anyhow::{anyhow, Result};
 use log::{debug, error, info};
-use parking_lot::{MutexGuard, RwLockWriteGuard};
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -51,12 +51,12 @@ fn handle_client_request(daemon: &Arc<Daemon>, stream: &mut UnixStream) -> Resul
         Request::Ping => handle_ping(),
         Request::Die => handle_die(),
         _ => {
-            let cbm_guard = daemon.cbm.lock();
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match request {
-                Request::Identify { device } => handle_identify(&cbm_guard, device),
-                Request::GetStatus { device } => handle_get_status(&cbm_guard, device),
+            let cbm = daemon.cbm.clone();
+            match request {
+                Request::Identify { device } => handle_identify(&cbm, device),
+                Request::GetStatus { device } => handle_get_status(&cbm, device),
                 Request::Mount { .. } | Request::Unmount { .. } | Request::BusReset => {
-                    let mut mps_guard = daemon.mountpoints.write();
+                    let mut mps = daemon.mountpoints.clone();
                     match request {
                         Request::Mount {
                             mountpoint,
@@ -64,27 +64,22 @@ fn handle_client_request(daemon: &Arc<Daemon>, stream: &mut UnixStream) -> Resul
                             dummy_formats,
                             bus_reset,
                         } => handle_mount(
-                            &cbm_guard,
-                            &mut mps_guard,
+                            cbm,
+                            &mut mps,
                             mountpoint,
                             device,
                             dummy_formats,
                             bus_reset,
                         ),
                         Request::Unmount { mountpoint, device } => {
-                            handle_unmount(&cbm_guard, &mut mps_guard, mountpoint, device)
+                            handle_unmount(&*cbm, &mut mps, mountpoint, device)
                         }
-                        Request::BusReset => handle_bus_reset(&cbm_guard, &mut mps_guard),
+                        Request::BusReset => handle_bus_reset(&*cbm, &*mps),
                         _ => unreachable!(),
                     }
                 }
                 _ => unreachable!(),
-            }))
-            .unwrap_or_else(|_| {
-                Err(DaemonError::InternalError(format!(
-                    "Internal error: handler panicked"
-                )))
-            })
+            }
         }
     }?;
 
@@ -102,8 +97,8 @@ fn handle_client_request(daemon: &Arc<Daemon>, stream: &mut UnixStream) -> Resul
 }
 
 fn handle_mount(
-    cbm: &MutexGuard<Cbm>,
-    mps: &mut RwLockWriteGuard<HashMap<u8, Mountpoint>>,
+    cbm: Arc<Mutex<Cbm>>,
+    mps: &mut Arc<RwLock<HashMap<u8, Mountpoint>>>,
     mountpoint: String,
     device: u8,
     dummy_formats: bool,
@@ -118,8 +113,8 @@ fn handle_mount(
 }
 
 fn handle_unmount(
-    cbm: &MutexGuard<Cbm>,
-    mps: &mut RwLockWriteGuard<HashMap<u8, Mountpoint>>,
+    cbm: &Mutex<Cbm>,
+    mps: &mut Arc<RwLock<HashMap<u8, Mountpoint>>>,
     mountpoint: Option<String>,
     device: Option<u8>,
 ) -> Result<Response, DaemonError> {
@@ -139,13 +134,13 @@ fn handle_unmount(
 
 // TO DO - need to mark all mountpoints that busreset happened
 fn handle_bus_reset(
-    cbm: &Cbm,
-    _mps: &mut RwLockWriteGuard<HashMap<u8, Mountpoint>>,
+    cbm: &Mutex<Cbm>,
+    _mps: &RwLock<HashMap<u8, Mountpoint>>,
 ) -> Result<Response, DaemonError> {
     info!("Request: Bus reset");
 
-    cbm.reset_bus()?;
-    Ok(Response::BusResetSuccess)
+    let guard = cbm.lock();
+    guard.reset_bus().map(|_| Ok(Response::BusResetSuccess))?
 }
 
 fn handle_ping() -> Result<Response, DaemonError> {
@@ -160,32 +155,40 @@ fn handle_die() -> Result<Response, DaemonError> {
     Ok(Response::Dying)
 }
 
-fn handle_identify(cbm: &MutexGuard<Cbm>, device: u8) -> Result<Response, DaemonError> {
+fn handle_identify(cbm: &Arc<Mutex<Cbm>>, device: u8) -> Result<Response, DaemonError> {
     info!("Request: Identify");
 
-    let device_info = cbm.identify(device)?;
-
-    debug!(
-        "Identify completed successfully {} {}",
-        device_info.device_type.as_str(),
-        device_info.description
-    );
-    Ok(Response::Identified {
-        device_type: format!("{}", device_info.device_type.as_str()),
-        description: device_info.description,
-    })
+    let guard = cbm.lock();
+    guard
+        .identify(device)
+        .inspect(|info| {
+            debug!(
+                "Identify completed successfully {} {}",
+                info.device_type.as_str(),
+                info.description
+            )
+        })
+        .map(|info| {
+            Ok(Response::Identified {
+                device_type: format!("{}", info.device_type.as_str()),
+                description: info.description,
+            })
+        })?
 }
 
-fn handle_get_status(cbm: &MutexGuard<Cbm>, device: u8) -> Result<Response, DaemonError> {
+fn handle_get_status(cbm: &Arc<Mutex<Cbm>>, device: u8) -> Result<Response, DaemonError> {
     info!("Request: GetStatus");
 
-    let status = cbm.get_status(device)?;
-
-    debug!(
-        "Get status completed successfully: {} (output is capped at 40 bytes)",
-        &status[..status.len().min(40)]
-    );
-    Ok(Response::GotStatus(status))
+    let guard = cbm.lock();
+    guard
+        .get_status(device)
+        .inspect(|status| {
+            debug!(
+                "Get status completed successfully: {} (output is capped at 40 bytes)",
+                &status[..status.len().min(40)]
+            )
+        })
+        .map(|status| Ok(Response::GotStatus(status)))?
 }
 
 fn send_response(stream: &mut UnixStream, response: Response) -> Result<()> {
