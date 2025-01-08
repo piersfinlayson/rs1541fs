@@ -1,4 +1,5 @@
 mod args;
+mod error;
 
 use args::{Args, ClientOperation};
 #[cfg(not(test))]
@@ -309,7 +310,7 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
-        Response::GotStatus { status } => {
+        Response::GotStatus(status) => {
             info!("Got device {} status {}", device, status);
             Ok(())
         }

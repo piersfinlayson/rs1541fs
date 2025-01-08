@@ -1,5 +1,6 @@
 use rs1541fs::cbm::Cbm;
 
+use crate::error::DaemonError;
 use crate::mount::Mountpoint;
 
 use std::collections::HashMap;
@@ -26,7 +27,7 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    pub fn new(cbm: Cbm) -> Result<Self, String> {
+    pub fn new(cbm: Cbm) -> Result<Self, DaemonError> {
         Ok(Self {
             cbm: Arc::new(Mutex::new(cbm)),
             mountpoints: Arc::new(RwLock::new(HashMap::new())),

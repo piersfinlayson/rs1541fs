@@ -20,18 +20,18 @@ mod bindings {
 #[allow(dead_code)]
 use bindings::*;
 
-use crate::cbmtypes::CbmDeviceInfo;
+use crate::cbmtype::CbmDeviceInfo;
 
 use libc::intptr_t;
 use log::{debug, error};
+use parking_lot::Mutex;
+use std::error::Error as StdError;
 use std::io::Error;
 use std::io::ErrorKind;
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use std::sync::Arc;
-use parking_lot::Mutex;
-use std::error::Error as StdError;
 
 // How long to allow an FFI call into libopencbm to take before giving up
 const FFI_CALL_THREAD_TIMEOUT: Duration = Duration::from_secs(5);
@@ -331,57 +331,62 @@ impl OpenCbm {
             Ok((buf, result))
         })
     }
-
 }
 
 /// Convert ASCII string to PETSCII
+#[allow(dead_code)]
 pub fn ascii_to_petscii(input: &str) -> Vec<u8> {
     let mut input_vec = input.as_bytes().to_vec();
-    
+
     // Need to convert to *mut i8 and ensure it's null-terminated
     input_vec.push(0); // Add null terminator
-    
+
     unsafe {
         // Call the FFI function with the correct type
         let input_ptr = input_vec.as_mut_ptr() as *mut i8;
         let result = cbm_ascii2petscii(input_ptr);
-        
+
         // Convert the result back to a Vec<u8>
         let mut output = Vec::new();
         let mut current = result;
         while !current.is_null() {
             let byte = *current as u8;
-            if byte == 0 { break; }
+            if byte == 0 {
+                break;
+            }
             output.push(byte);
             current = current.add(1);
         }
-        
+
         output
     }
 }
 
 /// Convert PETSCII to ASCII string
+#[allow(dead_code)]
 pub fn petscii_to_ascii(input: &[u8]) -> String {
     let mut input_vec = input.to_vec();
-    
+
     // Add null terminator
     input_vec.push(0);
-    
+
     unsafe {
         // Call the FFI function with the correct type
         let input_ptr = input_vec.as_mut_ptr() as *mut i8;
         let result = cbm_petscii2ascii(input_ptr);
-        
+
         // Convert the result to a String
         let mut output = Vec::new();
         let mut current = result;
         while !current.is_null() {
             let byte = *current as u8;
-            if byte == 0 { break; }
+            if byte == 0 {
+                break;
+            }
             output.push(byte);
             current = current.add(1);
         }
-        
+
         String::from_utf8_lossy(&output).into_owned()
     }
 }

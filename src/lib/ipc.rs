@@ -40,7 +40,5 @@ pub enum Response {
         device_type: String,
         description: String,
     },
-    GotStatus {
-        status: String,
-    },
+    GotStatus(String),
 }

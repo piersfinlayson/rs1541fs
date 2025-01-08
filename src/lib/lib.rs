@@ -1,5 +1,5 @@
 pub mod cbm;
-pub mod cbmtypes;
+pub mod cbmtype;
 pub mod ipc;
 pub mod logging;
 pub mod validate;

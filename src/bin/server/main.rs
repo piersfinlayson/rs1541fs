@@ -1,5 +1,6 @@
 mod args;
 mod daemon;
+mod error;
 mod ipc;
 mod mount;
 mod signal;

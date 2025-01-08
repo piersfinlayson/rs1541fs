@@ -3,6 +3,7 @@ use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
+use crate::cbmtype::CbmError;
 use crate::{DEFAULT_DEVICE_NUM, MAX_DEVICE_NUM, MIN_DEVICE_NUM};
 
 pub enum DeviceValidation {
@@ -10,6 +11,7 @@ pub enum DeviceValidation {
     Optional, // Can be None, None returned if so
     Default,  // Can be None, default returned if so
 }
+
 /// Validate a device Option.
 ///
 /// Args
@@ -18,15 +20,15 @@ pub enum DeviceValidation {
 pub fn validate_device(
     device: Option<u8>,
     validation: DeviceValidation,
-) -> Result<Option<u8>, String> {
+) -> Result<Option<u8>, CbmError> {
     match (device, validation) {
         (Some(nm), _) => {
             if nm < MIN_DEVICE_NUM || nm > MAX_DEVICE_NUM {
                 debug!("Device num out of allowed range {}", nm);
-                Err(format!(
+                Err(CbmError::ValidationError(format!(
                     "Device num must be between {} and {}",
                     MIN_DEVICE_NUM, MAX_DEVICE_NUM
-                ))
+                )))
             } else {
                 debug!("Device num in allowed range {}", nm);
                 Ok(device)
@@ -34,14 +36,14 @@ pub fn validate_device(
         }
         (None, DeviceValidation::Required) => {
             debug!("Error - no device num supplied");
-            Err(format!("No device num supplied"))
+            Err(CbmError::ValidationError(format!("No device num supplied")))
         }
         (None, DeviceValidation::Optional) => Ok(None),
         (None, DeviceValidation::Default) => Ok(Some(DEFAULT_DEVICE_NUM)),
     }
 }
 
-#[derive(PartialEq)] 
+#[derive(PartialEq)]
 pub enum ValidationType {
     Mount,
     Unmount,
@@ -50,12 +52,15 @@ pub fn validate_mountpoint<P: AsRef<Path>>(
     path: P,
     vtype: ValidationType,
     canonicalize: bool,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf, CbmError> {
     let path = path.as_ref();
 
     // Check if path exists before trying to canonicalize
     if !path.is_absolute() && !path.exists() {
-        return Err(format!("Path {} does not exist", path.display()));
+        return Err(CbmError::ValidationError(format!(
+            "Path {} does not exist",
+            path.display()
+        )));
     }
 
     // Get absolute path
@@ -68,38 +73,53 @@ pub fn validate_mountpoint<P: AsRef<Path>>(
             path
         );
         path.canonicalize().map_err(|e| {
-            format!(
+            CbmError::ValidationError(format!(
                 "Path {} is not absolute, and can't canonicalize: {}",
                 path.display(),
                 e
-            )
+            ))
         })?
     } else {
-        return Err(format!("Path '{}' must be absolute", path.display()));
+        return Err(CbmError::ValidationError(format!(
+            "Path '{}' must be absolute",
+            path.display()
+        )));
     };
 
     // Then check if it's a directory
     if !vpath.is_dir() {
-        return Err(format!("Mountpoint {} is not a directory", vpath.display()));
+        return Err(CbmError::ValidationError(format!(
+            "Mountpoint {} is not a directory",
+            vpath.display()
+        )));
     }
 
     // Check if empty when mounting
     if vtype == ValidationType::Mount {
         let has_entries = fs::read_dir(&vpath)
-            .map_err(|e| format!("Failed to read directory {}: {}", vpath.display(), e))?
+            .map_err(|e| {
+                CbmError::ValidationError(format!(
+                    "Failed to read directory {}: {}",
+                    vpath.display(),
+                    e
+                ))
+            })?
             .next()
             .is_some();
         if has_entries {
-            return Err(format!("Mountpoint {} is not empty", vpath.display()));
+            return Err(CbmError::ValidationError(format!(
+                "Mountpoint {} is not empty",
+                vpath.display()
+            )));
         }
     }
 
     // Check write access
     if !has_write_permission(&vpath) {
-        return Err(format!(
+        return Err(CbmError::ValidationError(format!(
             "No write permission for mountpoint {}",
             vpath.display()
-        ));
+        )));
     }
 
     Ok(vpath)
@@ -183,7 +203,10 @@ fn test_validate_mountpoint_absolute_path() {
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().to_path_buf();
 
-    assert!(matches!(validate_mountpoint(&path, ValidationType::Mount, false), Ok(_)));
+    assert!(matches!(
+        validate_mountpoint(&path, ValidationType::Mount, false),
+        Ok(_)
+    ));
 }
 
 #[test]
@@ -215,7 +238,10 @@ fn test_validate_mountpoint_canonicalize() {
     let path = temp_dir.path().join("test");
     fs::create_dir(&path).unwrap();
 
-    assert!(matches!(validate_mountpoint(&path, ValidationType::Mount, true), Ok(_)));
+    assert!(matches!(
+        validate_mountpoint(&path, ValidationType::Mount, true),
+        Ok(_)
+    ));
 }
 
 #[test]

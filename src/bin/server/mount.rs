@@ -2,6 +2,7 @@ use rs1541fs::cbm::{Cbm, CbmDriveUnit};
 use rs1541fs::validate::{validate_device, validate_mountpoint, DeviceValidation, ValidationType};
 
 use crate::args::get_args;
+use crate::error::DaemonError;
 
 use fuser::{
     spawn_mount2, BackgroundSession, FileAttr, Filesystem, MountOption, ReplyAttr, ReplyData,
@@ -62,18 +63,20 @@ impl Mountpoint {
         }
     }
 
-    pub fn refresh_directory(&mut self) -> Result<(), String> {
+    pub fn refresh_directory(&mut self) -> Result<(), DaemonError> {
         let mut guard = self.directory_cache.write();
         guard.entries.clear();
         guard.last_updated = std::time::SystemTime::now();
         Ok(())
     }
 
-    pub fn mount(&mut self) -> Result<(), String> {
+    pub fn mount(&mut self) -> Result<(), DaemonError> {
         debug!("Mountpoint {} instructed to mount", self);
 
         if self.fuser.is_some() {
-            return Err(format!("Cannot mount as we already have a fuser thread"));
+            return Err(DaemonError::ValidationError(format!(
+                "Cannot mount as we already have a fuser thread"
+            )));
         }
 
         // Build the FUSE options
@@ -96,15 +99,14 @@ impl Mountpoint {
         }
 
         // Call fuser to mount this mountpoint
-        let fuser = spawn_mount2(self.clone(), self.mountpoint.clone(), &options)
-            .map_err(|e| e.to_string())?;
+        let fuser = spawn_mount2(self.clone(), self.mountpoint.clone(), &options)?;
 
         self.fuser = Some(Arc::new(Mutex::new(fuser)));
 
         Ok(())
     }
 
-    pub fn unmount(&mut self) -> Result<(), String> {
+    pub fn unmount(&mut self) -> Result<(), DaemonError> {
         debug!("Mountpoint {} instructed to unmount", self);
         // Setting fuser to None will cause the fuser BackgroundSession to
         // drop, in turn causing fuser to exit for this mount
@@ -178,7 +180,7 @@ pub fn validate_mount_request<P: AsRef<Path>>(
     device: u8,
     dummy_formats: bool,
     bus_reset: bool,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf, DaemonError> {
     // If validation OK, assert that we got given the same device number - it
     // shouldn't change if it was validate, as we are doing Required
     // validation which doesn't return a default value, or otherwise change it
@@ -209,41 +211,33 @@ pub fn validate_mount_request<P: AsRef<Path>>(
 pub fn validate_unmount_request<P: AsRef<Path>>(
     mountpoint: &Option<P>,
     device: Option<u8>,
-) -> Result<(), String> {
+) -> Result<(), DaemonError> {
     // Validate that at least one of mountpoint or device is Some
     if mountpoint.is_none() && device.is_none() {
-        return Err(format!("Either mountpoint or device must be specified"));
+        return Err(DaemonError::ValidationError(format!(
+            "Either mountpoint or device must be specified"
+        )));
     }
 
     // Validate that only one of mountpoint or device is Some
     if mountpoint.is_some() && device.is_some() {
-        return Err(format!(
+        return Err(DaemonError::ValidationError(format!(
             "For an unmount only one of mountpoint or device must be specified"
-        ));
+        )));
     }
 
     // Validate the mountpoint
     if mountpoint.is_some() {
         let mountpoint_str = mountpoint.as_ref().clone().unwrap();
         let path = Path::new(mountpoint_str.as_ref());
-        match validate_mountpoint(&path, ValidationType::Unmount, false) {
-            Ok(rpath) => {
-                // Assert returned path is the same - cos we have said don't
-                // canonicalize
-                assert_eq!(path, rpath);
-            }
-            Err(e) => return Err(e),
-        };
+        let rpath = validate_mountpoint(&path, ValidationType::Unmount, false)?;
+        assert_eq!(path, rpath);
     }
 
     // Validate the device
     if device.is_some() {
-        match validate_device(device, DeviceValidation::Required) {
-            Ok(validated_device) => {
-                assert_eq!(validated_device, device);
-            }
-            Err(e) => return Err(e),
-        };
+        let vdevice = validate_device(device, DeviceValidation::Required)?;
+        assert_eq!(vdevice, device);
     }
 
     Ok(())
@@ -257,19 +251,25 @@ fn check_new_mount<P: AsRef<Path>>(
     mountpoints: &RwLockWriteGuard<HashMap<u8, Mountpoint>>,
     mountpoint: P,
     device: u8,
-) -> Result<(), String> {
+) -> Result<(), DaemonError> {
     // Check if device number is already mounted
     if mountpoints.get(&device).is_some() {
-        return Err(format!("Mountpoint for device {} already exists", device));
+        return Err(DaemonError::ValidationError(format!(
+            "Mountpoint for device {} already exists",
+            device
+        )));
     }
 
     // Check if mointpoint path is already mounted
-    if let Some(mp) = mountpoints.values().find(|mp| mp.mountpoint == mountpoint.as_ref().to_path_buf()) {
-        return Err(format!(
+    if let Some(mp) = mountpoints
+        .values()
+        .find(|mp| mp.mountpoint == mountpoint.as_ref().to_path_buf())
+    {
+        return Err(DaemonError::ValidationError(format!(
             "Device {} is already mounted at mountpoint {}",
             device,
             mp.mountpoint.display()
-        ));
+        )));
     }
 
     // No matches - return Ok(())
@@ -281,19 +281,19 @@ fn check_new_mount<P: AsRef<Path>>(
 ///
 /// Before creating the Mountpoint object, this function checks that it
 /// doesn't already exist.
-pub fn mount<P: AsRef<Path>>(
+pub fn create_mount<P: AsRef<Path>>(
     cbm: &MutexGuard<Cbm>,
     mps: &mut RwLockWriteGuard<HashMap<u8, Mountpoint>>,
     mountpoint: P,
     device: u8,
     _dummy_formats: bool,
     _bus_reset: bool,
-) -> Result<(), String> {
+) -> Result<(), DaemonError> {
     // Check this will be a new mount (i.e. it doesn't alreday exist)
     check_new_mount(mps, &mountpoint, device)?;
 
     // Try and identify the device using opencbm
-    let device_info = cbm.identify(device).map_err(|e| e.to_string())?;
+    let device_info = cbm.identify(device)?;
 
     // Create Mountpoint object
     let mut mount = Mountpoint::new(
@@ -309,36 +309,41 @@ pub fn mount<P: AsRef<Path>>(
 
     // Send I0 command
     let cmd = "0";
-    cbm.send_command(device, cmd).map_err(|e| format!("Error sending command {}: {:?}", cmd, e))?;
+    cbm.send_command(device, cmd)?;
 
     Ok(())
 }
 
-pub fn unmount<P: AsRef<Path>>(
+pub fn destroy_mount<P: AsRef<Path>>(
     _cbm: &MutexGuard<Cbm>,
     mps: &mut RwLockWriteGuard<HashMap<u8, Mountpoint>>,
     mountpoint: Option<P>,
     device: Option<u8>,
-) -> Result<(), String> {
+) -> Result<(), DaemonError> {
     assert!(mountpoint.is_some() || device.is_some());
 
     // Get the mount
     let mut mount = if let Some(device) = device {
         // Get it from the mountpoint
         mps.get(&device)
-            .ok_or_else(|| format!("No matching mounted device found {}", device))?
+            .ok_or_else(|| {
+                DaemonError::ValidationError(format!("No matching mounted device found {}", device))
+            })?
             .clone()
     } else {
         let path: PathBuf = mountpoint.expect("Unreachable code").as_ref().to_path_buf();
         mps.values()
             .find(|mp| mp.mountpoint == path)
-            .ok_or_else(|| format!("No matching mountpoint found {:?}", path))?
+            .ok_or_else(|| {
+                DaemonError::ValidationError(format!("No matching mountpoint found {:?}", path))
+            })?
             .clone()
     };
 
     debug!("Found Mountpoint object");
 
-    // Unmount it
+    // Unmount it - the fuser thread gets drop within this function, meaning
+    // the mount is actually removed from the kernel
     mount.unmount()?;
 
     // Remove from hashmap

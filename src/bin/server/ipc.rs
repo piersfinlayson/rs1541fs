@@ -2,7 +2,10 @@ use rs1541fs::cbm::Cbm;
 use rs1541fs::ipc::{Request, Response, SOCKET_PATH};
 
 use crate::daemon::Daemon;
-use crate::mount::{mount, unmount, validate_mount_request, validate_unmount_request, Mountpoint};
+use crate::error::DaemonError;
+use crate::mount::{
+    create_mount, destroy_mount, validate_mount_request, validate_unmount_request, Mountpoint,
+};
 
 use anyhow::{anyhow, Result};
 use log::{debug, error, info};
@@ -77,9 +80,13 @@ fn handle_client_request(daemon: &Arc<Daemon>, stream: &mut UnixStream) -> Resul
                 }
                 _ => unreachable!(),
             }))
-            .unwrap_or_else(|_| Response::Error("Internal error: handler panicked".into()))
+            .unwrap_or_else(|_| {
+                Err(DaemonError::InternalError(format!(
+                    "Internal error: handler panicked"
+                )))
+            })
         }
-    };
+    }?;
 
     match send_response(stream, response) {
         Ok(_) => Ok(()),
@@ -101,21 +108,13 @@ fn handle_mount(
     device: u8,
     dummy_formats: bool,
     bus_reset: bool,
-) -> Response {
+) -> Result<Response, DaemonError> {
     info!("Request: Mount device {} at {}", device, mountpoint.clone());
 
-    let mountpoint_path = match validate_mount_request(mountpoint, device, dummy_formats, bus_reset)
-    {
-        Ok(path) => path,
-        Err(e) => return Response::Error(e),
-    };
+    let mountpoint_path = validate_mount_request(mountpoint, device, dummy_formats, bus_reset)?;
 
-    mount(cbm, mps, &mountpoint_path, device, dummy_formats, bus_reset)
+    create_mount(cbm, mps, &mountpoint_path, device, dummy_formats, bus_reset)
         .map(|_| Response::MountSuccess)
-        .unwrap_or_else(|e| {
-            debug!("Mount failed: {}", e);
-            Response::Error(format!("Mount failed: {}", e))
-        })
 }
 
 fn handle_unmount(
@@ -123,102 +122,70 @@ fn handle_unmount(
     mps: &mut RwLockWriteGuard<HashMap<u8, Mountpoint>>,
     mountpoint: Option<String>,
     device: Option<u8>,
-) -> Response {
+) -> Result<Response, DaemonError> {
     info!(
         "Request: Unmount device {} or mountpoint {}",
         device.unwrap_or_default(),
         mountpoint.clone().unwrap_or_default()
     );
 
-    match validate_unmount_request(&mountpoint, device) {
-        Ok(_) => {}
-        Err(e) => return Response::Error(e),
-    }
+    validate_unmount_request(&mountpoint, device)?;
 
     // Get an option PathBuf
     let mountpoint_path = mountpoint.map(PathBuf::from);
 
-    unmount(cbm, mps, mountpoint_path, device)
-        .map(|_| Response::UnmountSuccess)
-        .unwrap_or_else(|e| {
-            debug!("Unmount failed: {}", e);
-            Response::Error(format!("Unmount failed: {}", e))
-        })
+    destroy_mount(cbm, mps, mountpoint_path, device).map(|_| Response::UnmountSuccess)
 }
 
 // TO DO - need to mark all mountpoints that busreset happened
 fn handle_bus_reset(
     cbm: &Cbm,
     _mps: &mut RwLockWriteGuard<HashMap<u8, Mountpoint>>,
-) -> Response {
+) -> Result<Response, DaemonError> {
     info!("Request: Bus reset");
 
-    match cbm.reset_bus() {
-        Ok(_) => {
-            debug!("Bus reset completed successfully");
-            Response::BusResetSuccess
-        }
-        Err(e) => {
-            debug!("Bus reset failed: {}", e);
-            Response::Error(e.to_string())
-        }
-    }
+    cbm.reset_bus()?;
+    Ok(Response::BusResetSuccess)
 }
 
-fn handle_ping() -> Response {
+fn handle_ping() -> Result<Response, DaemonError> {
     info!("Request: Ping");
     debug!("Send pong");
-    Response::Pong
+    Ok(Response::Pong)
 }
 
-fn handle_die() -> Response {
+fn handle_die() -> Result<Response, DaemonError> {
     info!("Request: Die");
     stop_server();
-    Response::Dying
+    Ok(Response::Dying)
 }
 
-fn handle_identify(cbm: &MutexGuard<Cbm>, device: u8) -> Response {
+fn handle_identify(cbm: &MutexGuard<Cbm>, device: u8) -> Result<Response, DaemonError> {
     info!("Request: Identify");
 
-    match cbm.identify(device) {
-        Ok(device_info) => {
-            debug!(
-                "Identify completed successfully {} {}",
-                device_info.device_type.as_str(),
-                device_info.description
-            );
-            Response::Identified {
-                device_type: format!("{}", device_info.device_type.as_str()),
-                description: device_info.description,
-            }
-        }
-        Err(e) => {
-            debug!("Identify failed: {}", e);
-            Response::Error(e.to_string())
-        }
-    }
+    let device_info = cbm.identify(device)?;
+
+    debug!(
+        "Identify completed successfully {} {}",
+        device_info.device_type.as_str(),
+        device_info.description
+    );
+    Ok(Response::Identified {
+        device_type: format!("{}", device_info.device_type.as_str()),
+        description: device_info.description,
+    })
 }
 
-fn handle_get_status(cbm: &MutexGuard<Cbm>, device: u8) -> Response {
+fn handle_get_status(cbm: &MutexGuard<Cbm>, device: u8) -> Result<Response, DaemonError> {
     info!("Request: GetStatus");
 
-    let result = cbm
-        .get_status(device)
-        .map(|status| Response::GotStatus { status })
-        .unwrap_or_else(|e| Response::Error(format!("{:?}", e)));
+    let status = cbm.get_status(device)?;
 
-    match &result {
-        Response::GotStatus { status } => {
-            debug!(
-                "Get status completed successfully: {} (output is capped at 40 bytes)",
-                &status[..status.len().min(40)]
-            )
-        }
-        Response::Error(e) => debug!("Get status failed: {}", e),
-        _ => unreachable!(),
-    }
-
-    result
+    debug!(
+        "Get status completed successfully: {} (output is capped at 40 bytes)",
+        &status[..status.len().min(40)]
+    );
+    Ok(Response::GotStatus(status))
 }
 
 fn send_response(stream: &mut UnixStream, response: Response) -> Result<()> {

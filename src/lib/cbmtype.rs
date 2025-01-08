@@ -1,12 +1,12 @@
 use crate::opencbm::OpenCbmError;
 
+use libc::{EBUSY, EINVAL, EIO, ENOENT, ENOTSUP};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use libc::{EBUSY, EIO, ENOENT, ENOTSUP};
 
 #[derive(Debug)]
 pub enum CbmError {
-    /// Device not responding or connection issues 
+    /// Device not responding or connection issues
     DeviceError(String),
     /// Channel allocation failed
     ChannelError(String),
@@ -24,6 +24,8 @@ pub enum CbmError {
     OpenCbmError(OpenCbmError),
     /// Maps to specific errno for FUSE
     FuseError(i32),
+    /// Used when validation fails
+    ValidationError(String),
 }
 
 impl From<OpenCbmError> for CbmError {
@@ -32,7 +34,9 @@ impl From<OpenCbmError> for CbmError {
             OpenCbmError::ConnectionError(msg) => CbmError::DeviceError(msg),
             OpenCbmError::ThreadTimeout => CbmError::TimeoutError,
             OpenCbmError::UnknownDevice(msg) => CbmError::DeviceError(msg),
-            OpenCbmError::ThreadPanic => CbmError::DeviceError("Thread panic during device operation".into()),
+            OpenCbmError::ThreadPanic => {
+                CbmError::DeviceError("Thread panic during device operation".into())
+            }
             OpenCbmError::Other(msg) => CbmError::DeviceError(msg),
         }
     }
@@ -51,6 +55,7 @@ impl CbmError {
             CbmError::InvalidOperation(_) => ENOTSUP,
             CbmError::OpenCbmError(_) => EIO,
             CbmError::FuseError(errno) => *errno,
+            CbmError::ValidationError(_) => EINVAL,
         }
     }
 }
@@ -73,10 +78,11 @@ impl fmt::Display for CbmError {
                     libc::ENOENT => "No such file or directory",
                     libc::ENOSPC => "No space left on device",
                     libc::ENOTSUP => "Operation not supported",
-                    _ => "Unknown error"
+                    _ => "Unknown error",
                 };
                 write!(f, "Filesystem error ({}): {}", errno, msg)
             }
+            CbmError::ValidationError(e) => write!(f, "Validation error: {}", e),
         }
     }
 }
@@ -86,7 +92,7 @@ impl std::error::Error for CbmError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             CbmError::OpenCbmError(e) => Some(e),
-            _ => None
+            _ => None,
         }
     }
 }
@@ -233,17 +239,26 @@ impl CbmStatus {
         // Parse the status line - expected format: "aa,bbbbbb,cc,dd"
         let parts: Vec<&str> = clean_status.trim().split(',').collect();
         if parts.len() != 4 {
-            return Err(CbmError::DeviceError(format!("Invalid status format: {}", clean_status)));
+            return Err(CbmError::DeviceError(format!(
+                "Invalid status format: {}",
+                clean_status
+            )));
         }
 
         // Parse the numeric components
-        let code = parts[0].trim().parse::<u8>()
+        let code = parts[0]
+            .trim()
+            .parse::<u8>()
             .map_err(|_| CbmError::DeviceError(format!("Invalid error code: {}", parts[0])))?;
-        
-        let detail1 = parts[2].trim().parse::<u8>()
+
+        let detail1 = parts[2]
+            .trim()
+            .parse::<u8>()
             .map_err(|_| CbmError::DeviceError(format!("Invalid detail1: {}", parts[2])))?;
-            
-        let detail2 = parts[3].trim().parse::<u8>()
+
+        let detail2 = parts[3]
+            .trim()
+            .parse::<u8>()
             .map_err(|_| CbmError::DeviceError(format!("Invalid detail2: {}", parts[3])))?;
 
         Ok(Self {
@@ -305,7 +320,10 @@ impl CbmStatus {
 
     /// Returns the full status string in CBM format
     pub fn as_str(&self) -> String {
-        format!("{:02},{},{:02},{:02}", self.code, self.message, self.detail1, self.detail2)
+        format!(
+            "{:02},{},{:02},{:02}",
+            self.code, self.message, self.detail1, self.detail2
+        )
     }
 }
 
@@ -326,17 +344,17 @@ impl fmt::Display for CbmStatus {
 // File types supported by CBM drives
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CbmFileType {
-    PRG,  // Program file
-    SEQ,  // Sequential file
-    USR,  // User file
-    REL,  // Relative file
+    PRG, // Program file
+    SEQ, // Sequential file
+    USR, // User file
+    REL, // Relative file
 }
 
 impl CbmFileType {
     fn to_suffix(&self) -> &'static str {
         match self {
             CbmFileType::PRG => ",P",
-            CbmFileType::SEQ => ",S", 
+            CbmFileType::SEQ => ",S",
             CbmFileType::USR => ",U",
             CbmFileType::REL => ",R",
         }
