@@ -281,7 +281,7 @@ impl OpenCbm {
     }
 
     /// Sends a TALK command to a device on the CBM bus
-    pub fn _talk(&self, device: u8, secondary_address: u8) -> OpenCbmResult<i32> {
+    pub fn talk(&self, device: u8, secondary_address: u8) -> OpenCbmResult<i32> {
         let handle = self.handle;
 
         opencbm_thread_timeout!({

@@ -160,7 +160,7 @@ fn handle_bus_reset(
         }
         Err(e) => {
             debug!("Bus reset failed: {}", e);
-            Response::Error(e)
+            Response::Error(e.to_string())
         }
     }
 }
@@ -194,7 +194,7 @@ fn handle_identify(cbm: &MutexGuard<Cbm>, device: u8) -> Response {
         }
         Err(e) => {
             debug!("Identify failed: {}", e);
-            Response::Error(e)
+            Response::Error(e.to_string())
         }
     }
 }

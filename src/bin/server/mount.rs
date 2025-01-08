@@ -293,7 +293,7 @@ pub fn mount<P: AsRef<Path>>(
     check_new_mount(mps, &mountpoint, device)?;
 
     // Try and identify the device using opencbm
-    let device_info = cbm.identify(device)?;
+    let device_info = cbm.identify(device).map_err(|e| e.to_string())?;
 
     // Create Mountpoint object
     let mut mount = Mountpoint::new(
@@ -308,7 +308,7 @@ pub fn mount<P: AsRef<Path>>(
     mps.insert(device, mount);
 
     // Send I0 command
-    let cmd = "i0";
+    let cmd = "0";
     cbm.send_command(device, cmd).map_err(|e| format!("Error sending command {}: {:?}", cmd, e))?;
 
     Ok(())
