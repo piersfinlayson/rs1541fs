@@ -51,41 +51,28 @@ fn handle_client_request(daemon: &Arc<Daemon>, stream: &mut UnixStream) -> Resul
     // Note we do NOT want to propogate errors upwards - we want to convert
     // errors into a Response::Error and send it, just like we do if we get
     // a response
-    let response = match request {
-        Request::Ping => handle_ping(),
-        Request::Die => handle_die(),
-        _ => {
-            let cbm = daemon.cbm.clone();
-            match request {
-                Request::Identify { device } => handle_identify(&cbm, device),
-                Request::GetStatus { device } => handle_get_status(&cbm, device),
-                Request::Mount { .. } | Request::Unmount { .. } | Request::BusReset => {
-                    let mut mps = daemon.mountpoints.clone();
-                    match request {
-                        Request::Mount {
-                            mountpoint,
-                            device,
-                            dummy_formats,
-                            bus_reset,
-                        } => handle_mount(
-                            cbm,
-                            &mut mps,
-                            mountpoint,
-                            device,
-                            dummy_formats,
-                            bus_reset,
-                        ),
-                        Request::Unmount { mountpoint, device } => {
-                            handle_unmount(&*cbm, &mut mps, mountpoint, device)
-                        }
-                        Request::BusReset => handle_bus_reset(&*cbm, &*mps),
-                        _ => unreachable!(),
-                    }
-                }
-                _ => unreachable!(),
+    let response = {
+        let cbm = daemon.cbm.clone();
+        let mut mps = daemon.mountpoints.clone();
+
+        match request {
+            Request::Ping => handle_ping(),
+            Request::Die => handle_die(),
+            Request::Identify { device } => handle_identify(&cbm, device),
+            Request::GetStatus { device } => handle_get_status(&cbm, device),
+            Request::Mount {
+                mountpoint,
+                device,
+                dummy_formats,
+                bus_reset,
+            } => handle_mount(cbm, &mut mps, mountpoint, device, dummy_formats, bus_reset),
+            Request::Unmount { mountpoint, device } => {
+                handle_unmount(&*cbm, &mut mps, mountpoint, device)
             }
+            Request::BusReset => handle_bus_reset(&*cbm, &*mps),
         }
-    }.map_or_else(|e| e.into(), |v| v);
+    }
+    .map_or_else(|e| e.into(), |v| v);
 
     match send_response(stream, response) {
         Ok(_) => Ok(()),
