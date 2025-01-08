@@ -41,7 +41,7 @@ pub struct OpenCbm {
     handle: intptr_t,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum OpenCbmError {
     ConnectionError(String),
     UnknownDevice(String),

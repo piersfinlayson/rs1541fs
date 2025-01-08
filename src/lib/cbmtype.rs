@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::fmt;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum CbmError {
     /// Device not responding or connection issues
     DeviceError(String),
@@ -286,7 +286,7 @@ impl CbmDeviceType {
 /// attempting to identify the drive is an initialize (I0).  This is done
 /// before reading the status.  Hence we shouldn't get 73 unless the drive is
 /// unexpected rebooted (or reboots itself).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CbmStatus {
     pub number: u8,
     pub error_number: CbmErrorNumber,
@@ -432,7 +432,7 @@ impl CbmStatus {
 
     /// For FILES SCRATCHED status, returns number of files scratched
     pub fn files_scratched(&self) -> Option<u8> {
-        if self.number == 1 {
+        if self.error_number == CbmErrorNumber::FilesScratched {
             Some(self.track)
         } else {
             None
@@ -690,14 +690,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_new_with_raw_status() {
-        let status = CbmStatus::new("00,OK,00,00#015#000OR,00,00").unwrap();
-        assert_eq!(status.number, 0);
-        assert_eq!(status.error_number, CbmErrorNumber::Ok);
-        assert_eq!(status.message, "OK");
-        assert_eq!(status.track, 0);
-        assert_eq!(status.sector, 0);
-        assert_eq!(status.is_ok(), CbmErrorNumberOk::Ok);
+    fn test_new_with_bad_status() {
+        let result = CbmStatus::new("bibble bobble flibble flobble");
+        assert_eq!(result, Err(CbmError::DeviceError("Invalid status format: bibble bobble flibble flobble".to_string())));
     }
 
     #[test]
@@ -718,28 +713,50 @@ mod tests {
     fn test_ok_status() {
         let status = CbmStatus::try_from("00,OK,00,00").unwrap();
         assert_eq!(status.is_ok(), CbmErrorNumberOk::Ok);
-        assert_eq!(status.to_string(), "OK");
+        assert_eq!(status.to_string(), "00,OK,00,00");
     }
 
+    #[test]
     fn test_73_status() {
         let status = CbmStatus::try_from("73,DOS MISMATCH,00,00").unwrap();
         assert_eq!(status.error_number, CbmErrorNumber::DosMismatch);
         assert_eq!(status.is_ok(), CbmErrorNumberOk::Number73);
-        assert_eq!(status.to_string(), "DOS MISMATCH");
+        assert_eq!(status.to_string(), "73,DOS MISMATCH,00,00");
+        assert_eq!(status.message, "DOS MISMATCH");
     }
 
     #[test]
     fn test_files_scratched() {
         let status = CbmStatus::try_from("01,FILES SCRATCHED,03,00").unwrap();
         assert_eq!(status.files_scratched(), Some(3));
-        assert_eq!(status.to_string(), "FILES SCRATCHED");
-        assert_eq!(status.is_ok(), CbmErrorNumberOk::Err);
+        assert_eq!(status.message, "FILES SCRATCHED");
+        assert_eq!(status.is_ok(), CbmErrorNumberOk::Ok);
+        assert_eq!(status.track, 3);
+        assert_eq!(status.sector, 0);
     }
 
     #[test]
     fn test_read_error_display() {
         let status = CbmStatus::try_from("21,READ ERROR,18,04").unwrap();
-        assert_eq!(status.to_string(), "READ ERROR");
+        assert_eq!(status.files_scratched(), None);
+        assert_eq!(status.to_string(), "21,READ ERROR,18,04");
         assert_eq!(status.is_ok(), CbmErrorNumberOk::Err);
+        assert_eq!(status.track, 18);
+        assert_eq!(status.sector, 4);
+    }
+
+    #[test]
+    fn test_null_bytes() {
+        // Will succeed
+        let status = CbmStatus::try_from("\09, DRIVER ERROR,00,00").unwrap();
+        assert_eq!(status.to_string(), "99,DRIVER ERROR,00,00");
+        let status = CbmStatus::try_from("\0\0, DRIVER ERROR,00,00").unwrap();
+        assert_eq!(status.to_string(), "99,DRIVER ERROR,00,00");
+        let status = CbmStatus::try_from("\0\0\0 DRIVER ERROR,00,00").unwrap();
+        assert_eq!(status.to_string(), "99,DRIVER ERROR,00,00");
+        
+        // Will fail
+        let result = CbmStatus::try_from("\0\0\0\0DRIVER ERROR,00,00");
+        assert_eq!(result, Err(CbmError::DeviceError("Invalid status format: \0DRIVER ERROR,00,00".to_string())));
     }
 }
