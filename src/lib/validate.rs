@@ -153,111 +153,123 @@ fn has_write_permission<P: AsRef<Path>>(path: P) -> bool {
 }
 
 #[cfg(test)]
-use tempfile::TempDir;
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
 
-#[test]
-fn test_validate_device_valid_numbers() {
-    // Valid numbers should work with any validation mode
-    assert!(matches!(
-        validate_device(Some(8), DeviceValidation::Required),
-        Ok(Some(8))
-    ));
-    assert!(matches!(
-        validate_device(Some(15), DeviceValidation::Optional),
-        Ok(Some(15))
-    ));
-    assert!(matches!(
-        validate_device(Some(10), DeviceValidation::Default),
-        Ok(Some(10))
-    ));
-}
+    mod device_validation {
+        use super::*;
 
-#[test]
-fn test_validate_device_invalid_numbers() {
-    // Invalid numbers should fail regardless of validation mode
-    assert!(validate_device(Some(7), DeviceValidation::Required).is_err());
-    assert!(validate_device(Some(16), DeviceValidation::Optional).is_err());
-    assert!(validate_device(Some(255), DeviceValidation::Default).is_err());
-}
+        #[test]
+        fn test_valid_numbers() {
+            // Valid numbers should work with any validation mode
+            assert!(matches!(
+                validate_device(Some(8), DeviceValidation::Required),
+                Ok(Some(8))
+            ));
+            assert!(matches!(
+                validate_device(Some(15), DeviceValidation::Optional),
+                Ok(Some(15))
+            ));
+            assert!(matches!(
+                validate_device(Some(10), DeviceValidation::Default),
+                Ok(Some(10))
+            ));
+        }
 
-#[test]
-fn test_validate_device_none_handling() {
-    // Required - None not allowed
-    assert!(validate_device(None, DeviceValidation::Required).is_err());
+        #[test]
+        fn test_invalid_numbers() {
+            // Invalid numbers should fail regardless of validation mode
+            assert!(validate_device(Some(7), DeviceValidation::Required).is_err());
+            assert!(validate_device(Some(16), DeviceValidation::Optional).is_err());
+            assert!(validate_device(Some(255), DeviceValidation::Default).is_err());
+        }
 
-    // Optional - None is allowed and returns None
-    assert!(matches!(
-        validate_device(None, DeviceValidation::Optional),
-        Ok(None)
-    ));
+        #[test]
+        fn test_none_handling() {
+            // Required - None not allowed
+            assert!(validate_device(None, DeviceValidation::Required).is_err());
 
-    // Default - None returns the default device number
-    assert!(matches!(
-        validate_device(None, DeviceValidation::Default),
-        Ok(Some(DEFAULT_DEVICE_NUM))
-    ));
-}
+            // Optional - None is allowed and returns None
+            assert!(matches!(
+                validate_device(None, DeviceValidation::Optional),
+                Ok(None)
+            ));
 
-#[test]
-fn test_validate_mountpoint_absolute_path() {
-    let temp_dir = TempDir::new().unwrap();
-    let path = temp_dir.path().to_path_buf();
+            // Default - None returns the default device number
+            assert!(matches!(
+                validate_device(None, DeviceValidation::Default),
+                Ok(Some(DEFAULT_DEVICE_NUM))
+            ));
+        }
+    }
 
-    assert!(matches!(
-        validate_mountpoint(&path, ValidationType::Mount, false),
-        Ok(_)
-    ));
-}
+    mod mountpoint_validation {
+        use super::*;
+        use std::fs;
 
-#[test]
-fn test_validate_mountpoint_non_absolute() {
-    assert!(validate_mountpoint("./relative/path", ValidationType::Mount, false).is_err());
-}
+        #[test]
+        fn test_absolute_path() {
+            let temp_dir = TempDir::new().unwrap();
+            let path = temp_dir.path().to_path_buf();
 
-#[test]
-fn test_validate_mountpoint_non_empty() {
-    let temp_dir = TempDir::new().unwrap();
-    let file_path = temp_dir.path().join("test.txt");
-    fs::write(&file_path, "test content").unwrap();
+            assert!(matches!(
+                validate_mountpoint(&path, ValidationType::Mount, false),
+                Ok(_)
+            ));
+        }
 
-    assert!(validate_mountpoint(temp_dir.path(), ValidationType::Mount, false).is_err());
-}
+        #[test]
+        fn test_non_absolute_path() {
+            assert!(validate_mountpoint("./relative/path", ValidationType::Mount, false).is_err());
+        }
 
-#[test]
-fn test_validate_mountpoint_not_directory() {
-    let temp_dir = TempDir::new().unwrap();
-    let file_path = temp_dir.path().join("test.txt");
-    fs::write(&file_path, "test content").unwrap();
+        #[test]
+        fn test_non_empty_directory() {
+            let temp_dir = TempDir::new().unwrap();
+            let file_path = temp_dir.path().join("test.txt");
+            fs::write(&file_path, "test content").unwrap();
 
-    assert!(validate_mountpoint(&file_path, ValidationType::Mount, false).is_err());
-}
+            assert!(validate_mountpoint(temp_dir.path(), ValidationType::Mount, false).is_err());
+        }
 
-#[test]
-fn test_validate_mountpoint_canonicalize() {
-    let temp_dir = TempDir::new().unwrap();
-    let path = temp_dir.path().join("test");
-    fs::create_dir(&path).unwrap();
+        #[test]
+        fn test_not_directory() {
+            let temp_dir = TempDir::new().unwrap();
+            let file_path = temp_dir.path().join("test.txt");
+            fs::write(&file_path, "test content").unwrap();
 
-    assert!(matches!(
-        validate_mountpoint(&path, ValidationType::Mount, true),
-        Ok(_)
-    ));
-}
+            assert!(validate_mountpoint(&file_path, ValidationType::Mount, false).is_err());
+        }
 
-#[test]
-fn test_has_write_permission() {
-    let temp_dir = TempDir::new().unwrap();
-    assert!(has_write_permission(temp_dir.path()));
+        #[test]
+        fn test_canonicalize() {
+            let temp_dir = TempDir::new().unwrap();
+            let path = temp_dir.path().join("test");
+            fs::create_dir(&path).unwrap();
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let readonly_dir = temp_dir.path().join("readonly");
-        fs::create_dir(&readonly_dir).unwrap();
-        let mut perms = fs::metadata(&readonly_dir).unwrap().permissions();
-        perms.set_mode(0o444); // read-only
-        fs::set_permissions(&readonly_dir, perms).unwrap();
+            assert!(matches!(
+                validate_mountpoint(&path, ValidationType::Mount, true),
+                Ok(_)
+            ));
+        }
 
-        assert!(!has_write_permission(&readonly_dir));
+        #[test]
+        fn test_write_permission() {
+            let temp_dir = TempDir::new().unwrap();
+            assert!(has_write_permission(temp_dir.path()));
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let readonly_dir = temp_dir.path().join("readonly");
+                fs::create_dir(&readonly_dir).unwrap();
+                let mut perms = fs::metadata(&readonly_dir).unwrap().permissions();
+                perms.set_mode(0o444); // read-only
+                fs::set_permissions(&readonly_dir, perms).unwrap();
+
+                assert!(!has_write_permission(&readonly_dir));
+            }
+        }
     }
 }
