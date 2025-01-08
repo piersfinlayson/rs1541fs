@@ -1,24 +1,20 @@
 use crate::ipc::stop_server;
 use rs1541fs::ipc::DAEMON_PID_FILENAME;
 
-use lazy_static::lazy_static;
 use log::{debug, error, info};
-use parking_lot::Mutex;
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::OnceLock;
 
-lazy_static! {
-    pub static ref SIGNAL_HANDLER: Mutex<Option<SignalHandler>> = Mutex::new(None);
-}
+pub static SIGNAL_HANDLER: OnceLock<SignalHandler> = OnceLock::new();
 
 pub fn create_signal_handler() {
-    let sh1 = SignalHandler::new().unwrap();
-    let mut sh2 = SIGNAL_HANDLER.lock();
-    *sh2 = Some(sh1);
+    let sh = SignalHandler::new().unwrap();
+    SIGNAL_HANDLER.set(sh).expect("Signal handler already initialized");
     debug!("Signal handler created");
 }
 
@@ -26,6 +22,7 @@ pub fn get_pid_filename() -> PathBuf {
     DAEMON_PID_FILENAME.into()
 }
 
+#[derive(Debug)]
 pub struct SignalHandler {
     _shutdown: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,

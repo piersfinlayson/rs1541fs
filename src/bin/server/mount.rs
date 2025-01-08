@@ -25,7 +25,7 @@ use std::time::{Duration, SystemTime};
 #[derive(Debug, Clone)]
 pub struct DirectoryCache {
     entries: HashMap<String, FileAttr>,
-    last_updated: std::time::SystemTime,
+    _last_updated: std::time::SystemTime,
 }
 
 /// Represents a mounted filesystem
@@ -64,16 +64,16 @@ impl Mountpoint {
             drive_unit: Arc::new(RwLock::new(drive_unit)),
             directory_cache: Arc::new(RwLock::new(DirectoryCache {
                 entries: HashMap::new(),
-                last_updated: SystemTime::now(),
+                _last_updated: SystemTime::now(),
             })),
             fuser: None,
         }
     }
 
-    pub fn refresh_directory(&mut self) -> Result<(), DaemonError> {
+    pub fn _refresh_directory(&mut self) -> Result<(), DaemonError> {
         let mut guard = self.directory_cache.write();
         guard.entries.clear();
-        guard.last_updated = std::time::SystemTime::now();
+        guard._last_updated = std::time::SystemTime::now();
         Ok(())
     }
 

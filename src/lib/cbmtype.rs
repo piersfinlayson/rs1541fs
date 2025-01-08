@@ -636,7 +636,7 @@ pub enum CbmFileType {
 }
 
 impl CbmFileType {
-    fn to_suffix(&self) -> &'static str {
+    fn _to_suffix(&self) -> &'static str {
         match self {
             CbmFileType::PRG => ",P",
             CbmFileType::SEQ => ",S",
@@ -655,7 +655,7 @@ pub enum CbmFileMode {
 }
 
 impl CbmFileMode {
-    fn to_suffix(&self) -> &'static str {
+    fn _to_suffix(&self) -> &'static str {
         match self {
             CbmFileMode::Read => "",
             CbmFileMode::Write => ",W",
@@ -679,7 +679,7 @@ pub enum CbmOperationType {
 
 /// Represents an active operation on a mountpoint
 #[derive(Debug)]
-struct CbmOperation {
+struct _CbmOperation {
     op_type: CbmOperationType,
     count: usize,
     has_write: bool, // True if any current operation is a write

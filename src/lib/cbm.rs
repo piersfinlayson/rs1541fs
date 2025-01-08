@@ -300,8 +300,8 @@ impl CbmFileHandle {
 /// supports 16 channels (0-15), with channel 15 reserved for control operations.
 #[derive(Debug, Clone)]
 pub struct CbmChannel {
-    number: u8,
-    purpose: CbmChannelPurpose,
+    _number: u8,
+    _purpose: CbmChannelPurpose,
     handle: Option<CbmFileHandle>, // Present when allocated for file operations
 }
 
@@ -354,8 +354,8 @@ impl CbmChannelManager {
                     let sequence = self.next_sequence.fetch_add(1, Ordering::SeqCst);
                     let handle = CbmFileHandle::new(device_number, drive_id, 15, sequence);
                     *slot = Some(CbmChannel {
-                        number: 15,
-                        purpose,
+                        _number: 15,
+                        _purpose: purpose,
                         handle: Some(handle),
                     });
                     return Some((15, handle.to_u64()));
@@ -371,8 +371,8 @@ impl CbmChannelManager {
                     let sequence = self.next_sequence.fetch_add(1, Ordering::SeqCst);
                     let handle = CbmFileHandle::new(device_number, drive_id, i, sequence);
                     *slot = Some(CbmChannel {
-                        number: i,
-                        purpose,
+                        _number: i,
+                        _purpose: purpose,
                         handle: Some(handle),
                     });
                     return Some((i, handle.to_u64()));
