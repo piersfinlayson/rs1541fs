@@ -47,6 +47,10 @@ fn handle_client_request(daemon: &Arc<Daemon>, stream: &mut UnixStream) -> Resul
     // - Handle Identify and GetStatus now (which need just cbm)
     // - Lock mountpoints for everything else
     // - Handle remainder of Requests (which need cbm and mountpoints)
+    //
+    // Note we do NOT want to propogate errors upwards - we want to convert
+    // errors into a Response::Error and send it, just like we do if we get
+    // a response
     let response = match request {
         Request::Ping => handle_ping(),
         Request::Die => handle_die(),
@@ -81,7 +85,7 @@ fn handle_client_request(daemon: &Arc<Daemon>, stream: &mut UnixStream) -> Resul
                 _ => unreachable!(),
             }
         }
-    }?;
+    }.map_or_else(|e| e.into(), |v| v);
 
     match send_response(stream, response) {
         Ok(_) => Ok(()),
