@@ -229,69 +229,27 @@ fn main() -> Result<()> {
     // Create the Mount, Unmount or BusReset request
     let request = create_request(operation);
 
-    // Store off some stuff for later logging
-    let request_logging = request.clone();
-    let (mountpoint, device) = match request_logging {
-        Request::Mount {
-            mountpoint, device, ..
-        } => (mountpoint, device.to_string()),
-        Request::Unmount {
-            mountpoint, device, ..
-        } => (
-            mountpoint.unwrap_or("".to_string()),
-            device.map_or(String::new(), |n| n.to_string()),
-        ),
-        Request::Identify { device, .. } => (String::new(), device.to_string()),
-        Request::GetStatus { device, .. } => (String::new(), device.to_string()),
-        _ => (String::new(), String::new()),
-    };
-
     // Send the request
     let response = send_request(request)?;
 
     // Handle the response
     match response {
-        Response::Error(err) => Err(anyhow!("Operation failed: {}", err)),
-        Response::MountSuccess => {
-            info!(
-                "Successfully instructed daemon to mount device {} at {}",
-                device, mountpoint
-            );
-            Ok(())
-        }
-        Response::UnmountSuccess => {
-            info!(
-                "Successfully instructed daemon to unmount device {} or mountpoint {}",
-                device, mountpoint
-            );
-            Ok(())
-        }
-        Response::BusResetSuccess => {
-            info!("Successfully instructed daemon to reset the bus");
-            Ok(())
-        }
-        Response::Pong => {
-            info!("Successfully received ping response from daemon");
-            Ok(())
-        }
-        Response::Dying => {
-            info!("Successfully received dying respose from daemon");
-            Ok(())
-        }
+        Response::Error(err) => Err(anyhow!(err)),
         Response::Identified {
             device_type,
             description,
         } => {
-            info!(
-                "Identified device {} as model {} description {}",
-                device, device_type, description
-            );
+            let output = format!("Model {} Description \"{}\"", device_type, description);
+            info!("{output}");
+            println!("{output}");
             Ok(())
         }
         Response::GotStatus(status) => {
-            info!("Got device {} status {}", device, status);
+            info!("Status {status}");
+            println!("Status {status}");
             Ok(())
         }
+        _ => Ok(()), // Nothing to output in these cases as it worked
     }
 }
 

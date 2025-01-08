@@ -30,6 +30,7 @@ pub enum ClientOperation {
     },
 
     /// Unmount the filesystem
+    #[clap(alias = "umount")] // also allow umount
     Unmount {
         /// Device number (default: 8)
         #[arg(short = 'd', long = "device")]

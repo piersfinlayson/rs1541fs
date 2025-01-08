@@ -1,7 +1,7 @@
 use crate::opencbm::OpenCbmError;
 
 use libc::{EBUSY, EINVAL, EIO, ENOENT, ENOTSUP, EPERM};
-use log::{debug, trace, warn};
+use log::{debug, trace, info, warn};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::fmt;
@@ -274,12 +274,12 @@ impl CbmDeviceType {
 /// Note that 73 is not an error if appears jsut after turning on (or a bus
 /// reset), but at other times is an error indicating DOS mismatch of the
 /// disk inserted.
-/// 
+///
 /// The manual isn't clear, but it may be that 73 after boot and 73 dos
 /// mismatch provide different error strings, so we can differentiate that
 /// way.  However, we're not going to bother to do so - and will consider 73
 /// an error - if its own sort of error.
-/// 
+///
 /// Rationale is thatwhen the daemon is created it resets the IEC bus
 /// (causing all attached drives to reboot), but it doesn't read the status
 /// until a mount is attempted.  Then the first thing that is done after
@@ -309,8 +309,40 @@ impl CbmStatus {
         } else {
             status
         };
-
+        // Also get rid of up to first 3 bytes if null - see next comment
+        // to understand why
+        let null_count = clean_status.chars()
+        .take(3)  // Only look at first 3 chars
+        .take_while(|&c| c == '\0')
+        .count();
+        let clean_status = &clean_status[null_count..];
+        
         debug!("Received cleaned device status: {}", clean_status);
+
+        // This is weird.  It looks like sometimes the first 1 or 2 bytes
+        // of the status from opencbm are set to \0 (null).  Only seen it
+        // when error is set to 99, DRIVER ERROR,00,00.  So we will
+        // copy with up to the first 3 bytes being null and try and match
+        // anyway.
+        // Note that this isn't going to work if the error is something
+        // else, but that will produce an error propogated upwards so will
+        // get logged. 
+        let opencbm_error = match clean_status {
+            s if s.starts_with("9, DRIVER ERROR,00,00") => true,
+            s if s.starts_with(", DRIVER ERROR,00,00") => true,
+            s if s.starts_with(" DRIVER ERROR,00,00") => true,
+            _ => false,
+        };
+        if opencbm_error {
+            info!("Recovered from error receiving status string from opencbm: {}", clean_status);
+            return Ok(Self {
+                number: 99,
+                error_number: CbmErrorNumber::OpenCbm,
+                message: "DRIVER ERROR".to_string(),
+                track: 0,
+                sector: 0,
+            });
+        }
 
         // Split on comma and collect
         let parts: Vec<&str> = clean_status.split(',').collect();
@@ -338,7 +370,7 @@ impl CbmStatus {
 
         let track = parts[2].trim().parse::<u8>().map_err(|_| {
             CbmError::DeviceError(format!(
-                "Invalid track: {} within status {}",
+                "Invalid track: {} within status: {}",
                 parts[2], clean_status
             ))
         })?;
@@ -351,7 +383,7 @@ impl CbmStatus {
             .parse::<u8>()
             .map_err(|_| {
                 CbmError::DeviceError(format!(
-                    "Invalid sector: {} within status {}",
+                    "Invalid sector: {} within status: {}",
                     parts[3], clean_status
                 ))
             })?;
@@ -433,7 +465,7 @@ impl fmt::Display for CbmStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{},{},{},{}",
+            "{:02},{},{:02},{:02}",
             self.number, self.message, self.track, self.sector
         )
     }
@@ -542,11 +574,15 @@ impl fmt::Display for CbmErrorNumber {
             CbmErrorNumber::ReadErrorBlockHeaderNotFound => "READ ERROR (block header not found)",
             CbmErrorNumber::ReadErrorNoSyncCharacter => "READ ERROR (no sync character)",
             CbmErrorNumber::ReadErrorDataBlockNotPresent => "READ ERROR (data block not present)",
-            CbmErrorNumber::ReadErrorChecksumErrorInDataBlock => "READ ERROR (checksum error in data block)",
+            CbmErrorNumber::ReadErrorChecksumErrorInDataBlock => {
+                "READ ERROR (checksum error in data block)"
+            }
             CbmErrorNumber::ReadErrorByteDecodingError => "READ ERROR (byte decoding error)",
             CbmErrorNumber::WriteErrorWriteVerifyError => "WRITE ERROR (write verify error)",
             CbmErrorNumber::WriteProtectOn => "WRITE PROTECT ON",
-            CbmErrorNumber::ReadErrorChecksumErrorInHeader => "READ ERROR (checksum error in header)",
+            CbmErrorNumber::ReadErrorChecksumErrorInHeader => {
+                "READ ERROR (checksum error in header)"
+            }
             CbmErrorNumber::WriteErrorLongDataBlock => "WRITE ERROR (long data block)",
             CbmErrorNumber::DiskIdMismatch => "DISK ID MISMATCH",
             CbmErrorNumber::SyntaxErrorGeneralSyntax => "SYNTAX ERROR (general syntax)",
@@ -554,7 +590,9 @@ impl fmt::Display for CbmErrorNumber {
             CbmErrorNumber::SyntaxErrorLongLine => "SYNTAX ERROR (long line)",
             CbmErrorNumber::SyntaxErrorInvalidFileName => "SYNTAX ERROR (invalid file name)",
             CbmErrorNumber::SyntaxErrorNoFileGiven => "SYNTAX ERROR (no file given))",
-            CbmErrorNumber::SyntaxErrorInvalidCommandChannel15 => "SYNTAX ERROR (invalid command on channel 15)",
+            CbmErrorNumber::SyntaxErrorInvalidCommandChannel15 => {
+                "SYNTAX ERROR (invalid command on channel 15)"
+            }
             CbmErrorNumber::RecordNotPresent => "RECORD NOT PRESENT",
             CbmErrorNumber::OverflowInRecord => "OVERFLOW IN RECORD",
             CbmErrorNumber::FileTooLarge => "FILE TOO LARGE",
@@ -666,7 +704,10 @@ mod tests {
     fn test_status_parsing() {
         let status = CbmStatus::try_from("21,READ ERROR,18,00").unwrap();
         assert_eq!(status.number, 21);
-        assert_eq!(status.error_number, CbmErrorNumber::ReadErrorNoSyncCharacter);
+        assert_eq!(
+            status.error_number,
+            CbmErrorNumber::ReadErrorNoSyncCharacter
+        );
         assert_eq!(status.message, "READ ERROR");
         assert_eq!(status.track, 18);
         assert_eq!(status.sector, 0);

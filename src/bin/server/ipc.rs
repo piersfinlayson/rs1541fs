@@ -51,6 +51,7 @@ fn handle_client_request(daemon: &Arc<Daemon>, stream: &mut UnixStream) -> Resul
     // Note we do NOT want to propogate errors upwards - we want to convert
     // errors into a Response::Error and send it, just like we do if we get
     // a response
+    info!("Request: {}", request);
     let response = {
         let cbm = daemon.cbm.clone();
         let mut mps = daemon.mountpoints.clone();
@@ -74,6 +75,8 @@ fn handle_client_request(daemon: &Arc<Daemon>, stream: &mut UnixStream) -> Resul
     }
     .map_or_else(|e| e.into(), |v| v);
 
+    info!("Response: {}", response);
+
     match send_response(stream, response) {
         Ok(_) => Ok(()),
         Err(e) => {
@@ -95,8 +98,6 @@ fn handle_mount(
     dummy_formats: bool,
     bus_reset: bool,
 ) -> Result<Response, DaemonError> {
-    info!("Request: Mount device {} at {}", device, mountpoint.clone());
-
     let mountpoint_path = validate_mount_request(mountpoint, device, dummy_formats, bus_reset)?;
 
     create_mount(cbm, mps, &mountpoint_path, device, dummy_formats, bus_reset)
@@ -109,12 +110,6 @@ fn handle_unmount(
     mountpoint: Option<String>,
     device: Option<u8>,
 ) -> Result<Response, DaemonError> {
-    info!(
-        "Request: Unmount device {} or mountpoint {}",
-        device.unwrap_or_default(),
-        mountpoint.clone().unwrap_or_default()
-    );
-
     validate_unmount_request(&mountpoint, device)?;
 
     // Get an option PathBuf
@@ -128,27 +123,20 @@ fn handle_bus_reset(
     cbm: &Mutex<Cbm>,
     _mps: &RwLock<HashMap<u8, Mountpoint>>,
 ) -> Result<Response, DaemonError> {
-    info!("Request: Bus reset");
-
     let guard = cbm.lock();
     guard.reset_bus().map(|_| Ok(Response::BusResetSuccess))?
 }
 
 fn handle_ping() -> Result<Response, DaemonError> {
-    info!("Request: Ping");
-    debug!("Send pong");
     Ok(Response::Pong)
 }
 
 fn handle_die() -> Result<Response, DaemonError> {
-    info!("Request: Die");
     stop_server();
     Ok(Response::Dying)
 }
 
 fn handle_identify(cbm: &Arc<Mutex<Cbm>>, device: u8) -> Result<Response, DaemonError> {
-    info!("Request: Identify");
-
     let guard = cbm.lock();
     guard
         .identify(device)
@@ -168,8 +156,6 @@ fn handle_identify(cbm: &Arc<Mutex<Cbm>>, device: u8) -> Result<Response, Daemon
 }
 
 fn handle_get_status(cbm: &Arc<Mutex<Cbm>>, device: u8) -> Result<Response, DaemonError> {
-    info!("Request: GetStatus");
-
     let guard = cbm.lock();
     guard
         .get_status(device)

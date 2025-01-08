@@ -1,5 +1,5 @@
 pub use crate::cbmtype::CbmDeviceInfo;
-use crate::cbmtype::{CbmDeviceType, CbmError, CbmErrorNumberOk, CbmStatus, CbmErrorNumber};
+use crate::cbmtype::{CbmDeviceType, CbmError, CbmErrorNumber, CbmErrorNumberOk, CbmStatus};
 use crate::opencbm::{ascii_to_petscii, OpenCbm};
 
 use log::{debug, info};
@@ -159,7 +159,7 @@ impl Cbm {
 
         // Check status after open
         let status = self.get_status(device)?;
-        if status.is_ok() != CbmErrorNumberOk::Ok{
+        if status.is_ok() != CbmErrorNumberOk::Ok {
             return Err(status.into());
         }
 
@@ -201,7 +201,7 @@ impl Cbm {
 
         // Check status after open
         let status = self.get_status(device)?;
-        if status.is_ok() != CbmErrorNumberOk::Ok{
+        if status.is_ok() != CbmErrorNumberOk::Ok {
             return Err(status.into());
         }
 
@@ -435,9 +435,13 @@ impl CbmDriveUnit {
         }
     }
 
-    pub fn send_init(&mut self, cbm: &Arc<Mutex<Cbm>>, ignore_errors: &Vec<CbmErrorNumber>) -> Result<Vec<CbmStatus>, CbmError> {
+    pub fn send_init(
+        &mut self,
+        cbm: &Arc<Mutex<Cbm>>,
+        ignore_errors: &Vec<CbmErrorNumber>,
+    ) -> Result<Vec<CbmStatus>, CbmError> {
         let guard = cbm.lock();
-    
+
         // First ? catches panic and maps to CbmError
         // Second > propogates CbmError (from first, or from within {})
         let mut status_vec: Vec<CbmStatus> = Vec::new();
@@ -457,7 +461,7 @@ impl CbmDriveUnit {
                 Ok(())
             })
         }))??;
-    
+
         Ok(status_vec)
     }
 
