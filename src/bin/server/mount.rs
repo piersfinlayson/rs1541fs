@@ -15,7 +15,9 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime};
 
 /// Cache for directory entries
@@ -26,6 +28,37 @@ use std::time::{Duration, SystemTime};
 pub struct DirectoryCache {
     entries: HashMap<String, FileAttr>,
     _last_updated: std::time::SystemTime,
+}
+
+#[derive(Debug, Clone)]
+struct MountWorkThread {
+    handle: Option<Arc<JoinHandle<()>>>,
+    completed: Arc<AtomicBool>,
+    _mount: Arc<Mutex<Mountpoint>>,
+}
+
+impl MountWorkThread {
+    pub fn new<F>(mount: &Mountpoint, worker: F) -> Arc<Mutex<Self>>
+    where
+        F: FnOnce(Arc<Mutex<MountWorkThread>>) + Send + 'static,
+    {
+        let completed = Arc::new(AtomicBool::new(false));
+        let mount = Arc::new(Mutex::new(mount.clone()));
+        
+        // Create with placeholder handle
+        let wt = Self {
+            handle: None,
+            completed,
+            _mount: mount,
+        };
+        
+        let shared_wt = Arc::new(Mutex::new(wt));
+        let worker_wt = shared_wt.clone();
+        
+        shared_wt.lock().handle = Some(Arc::new(thread::spawn(move || worker(worker_wt))));
+
+        shared_wt
+    }
 }
 
 /// Represents a mounted filesystem
@@ -39,6 +72,7 @@ pub struct Mountpoint {
     drive_unit: Arc<RwLock<CbmDriveUnit>>,
     directory_cache: Arc<RwLock<DirectoryCache>>,
     fuser: Option<Arc<Mutex<BackgroundSession>>>,
+    dir_wt: Option<Arc<Mutex<MountWorkThread>>>,
 }
 
 impl fmt::Display for Mountpoint {
@@ -67,6 +101,20 @@ impl Mountpoint {
                 _last_updated: SystemTime::now(),
             })),
             fuser: None,
+            dir_wt: None,
+        }
+    }
+
+    fn check_if_workthread_completed(workthread: &mut Option<Arc<Mutex<MountWorkThread>>>) -> bool {
+        if let Some(wt) = &workthread {
+            if wt.lock().completed.load(Ordering::SeqCst) {
+                *workthread = None;
+                true
+            } else {
+                false
+            }
+        } else {
+            true
         }
     }
 
@@ -113,10 +161,21 @@ impl Mountpoint {
     pub fn mount(&mut self) -> Result<(), DaemonError> {
         debug!("Mountpoint {} instructed to mount", self);
 
-        // Create the fuser thread
-        self.create_fuser()?;
+        if self.fuser.is_some() {
+            return Err(DaemonError::InternalError(format!(
+                "Trying to mount an already mounted Mountpoint object {}",
+                self.mountpoint.display()
+            )));
+        }
+        
+        if !Self::check_if_workthread_completed(&mut self.dir_wt) {
+            return Err(DaemonError::InternalError(format!(
+                "Trying to mount an already mounted Mountpoint object (work) {}",
+                self.mountpoint.display()
+            )));
+        }
 
-        // When the mount is mounted, we immediately and syncronously send an
+        // First of all, immediately and syncronously send an
         // initialize command to the drive (for both drives if appropriate).
         // While DOS 2 drives don't need an initialize command before reading
         // the directory, there's no harm in doing so, and may reset some bad
@@ -125,12 +184,22 @@ impl Mountpoint {
         // Note we want to ignore error 21 READ ERROR (no sync character) as
         // this means there's no disk in the drive which we support even with
         // a mounted filesystem.
+        // If we don't succeed in initing (with perhaps an error 21) we will
+        // the mount (and not bother mounting fuser)
         let mut guard = self.drive_unit.write();
         let ignore = vec![CbmErrorNumber::ReadErrorNoSyncCharacter];
-        guard
-            .send_init(&self.cbm, &ignore)
-            .inspect(|status_vec| debug!("Status from drive (error 21 ignored): {:?}", status_vec))
-            .map(|_| Ok(()))?
+        guard.send_init(&self.cbm, &ignore).inspect(|status_vec| {
+            debug!("Status from drive (error 21 ignored): {:?}", status_vec)
+        })?;
+        drop(guard);
+
+        // Create the fuser thread
+        self.create_fuser()?;
+
+        // kick off a directory read, in a separate thread
+        self.dir_wt = Some(MountWorkThread::new(self, dir_read));
+
+        Ok(())
     }
 
     pub fn unmount(&mut self) -> Result<(), DaemonError> {
@@ -201,6 +270,13 @@ impl Filesystem for Mountpoint {
         reply.data(b"Hello World!\n");
     }
 }
+
+fn dir_read(wt: Arc<Mutex<MountWorkThread>>) {
+        debug!("trigger_dir_read called");
+
+        debug!("trigger_dir_read completed");
+        wt.lock().completed.store(true, Ordering::SeqCst);
+    }
 
 pub fn validate_mount_request<P: AsRef<Path>>(
     mountpoint: P,

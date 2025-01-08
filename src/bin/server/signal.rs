@@ -14,7 +14,9 @@ pub static SIGNAL_HANDLER: OnceLock<SignalHandler> = OnceLock::new();
 
 pub fn create_signal_handler() {
     let sh = SignalHandler::new().unwrap();
-    SIGNAL_HANDLER.set(sh).expect("Signal handler already initialized");
+    SIGNAL_HANDLER
+        .set(sh)
+        .expect("Signal handler already initialized");
     debug!("Signal handler created");
 }
 

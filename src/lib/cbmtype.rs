@@ -1,7 +1,7 @@
 use crate::opencbm::OpenCbmError;
 
 use libc::{EBUSY, EINVAL, EIO, ENOENT, ENOTSUP, EPERM};
-use log::{debug, trace, info, warn};
+use log::{debug, info, trace, warn};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::fmt;
@@ -311,12 +311,13 @@ impl CbmStatus {
         };
         // Also get rid of up to first 3 bytes if null - see next comment
         // to understand why
-        let null_count = clean_status.chars()
-        .take(3)  // Only look at first 3 chars
-        .take_while(|&c| c == '\0')
-        .count();
+        let null_count = clean_status
+            .chars()
+            .take(3) // Only look at first 3 chars
+            .take_while(|&c| c == '\0')
+            .count();
         let clean_status = &clean_status[null_count..];
-        
+
         debug!("Received cleaned device status: {}", clean_status);
 
         // This is weird.  It looks like sometimes the first 1 or 2 bytes
@@ -326,7 +327,7 @@ impl CbmStatus {
         // anyway.
         // Note that this isn't going to work if the error is something
         // else, but that will produce an error propogated upwards so will
-        // get logged. 
+        // get logged.
         let opencbm_error = match clean_status {
             s if s.starts_with("9, DRIVER ERROR,00,00") => true,
             s if s.starts_with(", DRIVER ERROR,00,00") => true,
@@ -334,7 +335,10 @@ impl CbmStatus {
             _ => false,
         };
         if opencbm_error {
-            info!("Recovered from error receiving status string from opencbm: {}", clean_status);
+            info!(
+                "Recovered from error receiving status string from opencbm: {}",
+                clean_status
+            );
             return Ok(Self {
                 number: 99,
                 error_number: CbmErrorNumber::OpenCbm,
@@ -692,7 +696,12 @@ mod tests {
     #[test]
     fn test_new_with_bad_status() {
         let result = CbmStatus::new("bibble bobble flibble flobble");
-        assert_eq!(result, Err(CbmError::DeviceError("Invalid status format: bibble bobble flibble flobble".to_string())));
+        assert_eq!(
+            result,
+            Err(CbmError::DeviceError(
+                "Invalid status format: bibble bobble flibble flobble".to_string()
+            ))
+        );
     }
 
     #[test]
@@ -754,9 +763,14 @@ mod tests {
         assert_eq!(status.to_string(), "99,DRIVER ERROR,00,00");
         let status = CbmStatus::try_from("\0\0\0 DRIVER ERROR,00,00").unwrap();
         assert_eq!(status.to_string(), "99,DRIVER ERROR,00,00");
-        
+
         // Will fail
         let result = CbmStatus::try_from("\0\0\0\0DRIVER ERROR,00,00");
-        assert_eq!(result, Err(CbmError::DeviceError("Invalid status format: \0DRIVER ERROR,00,00".to_string())));
+        assert_eq!(
+            result,
+            Err(CbmError::DeviceError(
+                "Invalid status format: \0DRIVER ERROR,00,00".to_string()
+            ))
+        );
     }
 }
