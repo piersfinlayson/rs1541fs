@@ -12,7 +12,7 @@ use rs1541fs::cbm::Cbm;
 use rs1541fs::logging::init_logging;
 
 use daemonize::Daemonize;
-use log::{debug, error, info};
+use log::{error, info};
 use scopeguard::defer;
 use signal::{create_signal_handler, get_pid_filename};
 use std::fs;
@@ -110,9 +110,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let daemon = Arc::new(Daemon::new(cbm)?);
 
     // Start the server and loop forever listening for mount/unmount requests
-    debug!("Start IPC server");
     run_server(daemon)?;
-    debug!("IPC server exited");
+    info!("IPC server exited");
 
     // Cannot explicitly drop CBM so the driver is closed at this point
     // However, once all the threads with copies of cbm exit it should be

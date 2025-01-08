@@ -210,7 +210,7 @@ fn setup_socket() -> Result<UnixListener> {
     cleanup_socket();
 
     // Create new socket
-    info!("Starting IPC server on {}", SOCKET_PATH);
+    debug!("Create IPC server on {}", SOCKET_PATH);
     UnixListener::bind(SOCKET_PATH).map_err(|e| anyhow!("Failed to create socket: {}", e))
 }
 
@@ -221,7 +221,7 @@ pub fn run_server(daemon: Arc<Daemon>) -> Result<()> {
     listener.set_nonblocking(true)?;
     RUNNING.store(true, Ordering::SeqCst);
 
-    info!("IPC server ready to accept connections");
+    info!("IPC server ready to accept connections on {}", SOCKET_PATH);
     while RUNNING.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((mut stream, _addr)) => {

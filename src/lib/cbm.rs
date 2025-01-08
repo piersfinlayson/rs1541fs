@@ -2,7 +2,7 @@ pub use crate::cbmtype::CbmDeviceInfo;
 use crate::cbmtype::{CbmDeviceType, CbmError, CbmStatus};
 use crate::opencbm::{ascii_to_petscii, OpenCbm};
 
-use log::debug;
+use log::{info, debug};
 use parking_lot::Mutex;
 
 use std::collections::HashMap;
@@ -23,6 +23,7 @@ impl Cbm {
     /// default device
     pub fn new() -> Result<Self, CbmError> {
         let cbm = OpenCbm::open().map_err(|e| CbmError::DeviceError(e.to_string()))?;
+        info!("Reseting IEC/IEEE-488 bus");
         cbm.reset()
             .map_err(|e| CbmError::DeviceError(e.to_string()))?;
         debug!("Successfully opened and reset Cbm");
