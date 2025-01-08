@@ -43,15 +43,16 @@ impl SignalHandler {
             for signal in signals.forever() {
                 info!("Signal {} caught - handling", signal);
 
-                //let _ = Command::new("fusermount")
-                //    .args(["-u", "-z", &mountpoint])
-                //    .status();
+                // We don't need to manually unmount the mounts as when main
+                // exits all references to the fuser instances get dropped
+                // causing the mounts to be auto-unmounted by fuser.
+
                 debug!("Close IPC socket");
                 stop_server();
 
                 shutdown_clone.store(true, Ordering::SeqCst);
 
-                // This may be extraneous - as main() should exit graceefully
+                // This may be extraneous - as main() should exit gracefully
                 // and remove the pidfile
                 if Path::new(&get_pid_filename()).exists() {
                     debug!("Removing pidfile");
