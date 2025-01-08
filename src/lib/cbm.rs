@@ -269,7 +269,16 @@ impl Cbm {
         // In a real implementation, we'd use the CbmChannelManager here
         let channel = 2; // For demonstration
         
-        // Open file for reading
+        // Open file for reading 
+        self.send_command(device, &format!("{}", filename))?;
+        
+        // Check status after open
+        let status = self.get_status(device)?;
+        if !status.starts_with("00,") {
+            return Err(CbmError::FileError(format!("Failed to open file: {}", status)));
+        }
+        
+        // Now read the file data
         cbm_guard.talk(device, channel)
             .map_err(|e| CbmError::FileError(format!("Talk failed: {}", e)))?;
             
@@ -299,7 +308,16 @@ impl Cbm {
         // In a real implementation, we'd use the CbmChannelManager here
         let channel = 2; // For demonstration
         
-        // Open file for writing
+        // Open file for writing with overwrite if exists
+        self.send_command(device, &format!("@:{}", filename))?;
+        
+        // Check status after open
+        let status = self.get_status(device)?;
+        if !status.starts_with("00,") {
+            return Err(CbmError::FileError(format!("Failed to open file for writing: {}", status)));
+        }
+        
+        // Now write the file data
         cbm_guard.listen(device, channel)
             .map_err(|e| CbmError::FileError(format!("Listen failed: {}", e)))?;
             
@@ -307,7 +325,7 @@ impl Cbm {
         for chunk in data.chunks(256) {
             let result = cbm_guard.raw_write(chunk)
                 .map_err(|e| CbmError::FileError(format!("Write failed: {}", e)))?;
-                
+                    
             if result != chunk.len() as i32 {
                 return Err(CbmError::FileError("Failed to write complete chunk".into()));
             }
@@ -316,11 +334,11 @@ impl Cbm {
         // Cleanup
         cbm_guard.unlisten()
             .map_err(|e| CbmError::FileError(format!("Unlisten failed: {}", e)))?;
-            
+                
         Ok(())
     }
 
-    /// Delete a file from disk
+/// Delete a file from disk
     pub fn delete_file(&self, device: u8, filename: &str) -> Result<(), CbmError> {
         // Construct scratch command (S:filename)
         let cmd = format!("S0:{}", filename);
