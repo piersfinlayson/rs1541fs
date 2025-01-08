@@ -1,4 +1,5 @@
 use rs1541fs::cbm::{Cbm, CbmDriveUnit};
+use rs1541fs::cbmtype::CbmErrorNumber;
 use rs1541fs::validate::{validate_device, validate_mountpoint, DeviceValidation, ValidationType};
 
 use crate::args::get_args;
@@ -121,11 +122,14 @@ impl Mountpoint {
         // the directory, there's no harm in doing so, and may reset some bad
         // state in the drive.  We could also decide to do a soft reset of
         // the drive at this point.
+        // Note we want to ignore error 21 READ ERROR (no sync character) as
+        // this means there's no disk in the drive which we support even with
+        // a mounted filesystem.
         let mut guard = self.drive_unit.write();
-
+        let ignore = vec![CbmErrorNumber::ReadErrorNoSyncCharacter];
         guard
-            .send_init(&self.cbm)
-            .inspect(|status_vec| debug!("Status from drive: {:?}", status_vec))
+            .send_init(&self.cbm, &ignore)
+            .inspect(|status_vec| debug!("Status from drive (error 21 ignored): {:?}", status_vec))
             .map(|_| Ok(()))?
     }
 

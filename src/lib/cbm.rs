@@ -1,8 +1,8 @@
 pub use crate::cbmtype::CbmDeviceInfo;
-use crate::cbmtype::{CbmDeviceType, CbmError, CbmStatus};
+use crate::cbmtype::{CbmDeviceType, CbmError, CbmErrorNumberOk, CbmStatus, CbmErrorNumber};
 use crate::opencbm::{ascii_to_petscii, OpenCbm};
 
-use log::{info, debug};
+use log::{debug, info};
 use parking_lot::Mutex;
 
 use std::collections::HashMap;
@@ -159,7 +159,7 @@ impl Cbm {
 
         // Check status after open
         let status = self.get_status(device)?;
-        if status.is_error() {
+        if status.is_ok() != CbmErrorNumberOk::Ok{
             return Err(status.into());
         }
 
@@ -201,7 +201,7 @@ impl Cbm {
 
         // Check status after open
         let status = self.get_status(device)?;
-        if status.is_error() {
+        if status.is_ok() != CbmErrorNumberOk::Ok{
             return Err(status.into());
         }
 
@@ -435,9 +435,9 @@ impl CbmDriveUnit {
         }
     }
 
-    pub fn send_init(&mut self, cbm: &Arc<Mutex<Cbm>>) -> Result<Vec<CbmStatus>, CbmError> {
+    pub fn send_init(&mut self, cbm: &Arc<Mutex<Cbm>>, ignore_errors: &Vec<CbmErrorNumber>) -> Result<Vec<CbmStatus>, CbmError> {
         let guard = cbm.lock();
-
+    
         // First ? catches panic and maps to CbmError
         // Second > propogates CbmError (from first, or from within {})
         let mut status_vec: Vec<CbmStatus> = Vec::new();
@@ -446,14 +446,18 @@ impl CbmDriveUnit {
                 let cmd = format!("i{}", ii);
                 guard.send_command(self.device_number, &cmd)?;
                 let status = guard.get_status(self.device_number)?;
-                if status.is_error() {
-                    return Err(CbmError::CommandError(format!("{} {}", cmd, status)));
+                if status.is_ok() != CbmErrorNumberOk::Ok {
+                    if !ignore_errors.contains(&status.error_number) {
+                        return Err(CbmError::CommandError(format!("{} {}", cmd, status)));
+                    } else {
+                        debug!("Ignoring error {}", status.error_number);
+                    }
                 }
                 status_vec.push(status);
                 Ok(())
             })
         }))??;
-
+    
         Ok(status_vec)
     }
 

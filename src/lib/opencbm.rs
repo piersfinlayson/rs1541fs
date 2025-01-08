@@ -23,7 +23,7 @@ use bindings::*;
 use crate::cbmtype::CbmDeviceInfo;
 
 use libc::intptr_t;
-use log::{debug, error};
+use log::{debug, error, warn};
 use parking_lot::Mutex;
 use std::error::Error as StdError;
 use std::io::Error;
@@ -138,6 +138,7 @@ macro_rules! opencbm_thread_timeout {
             }
             Err(_) => {
                 // Thread is likely blocked in FFI call
+                warn!("Caught timeout in opencbm FFI call");
                 Err(OpenCbmError::ThreadTimeout)
             }
         }
