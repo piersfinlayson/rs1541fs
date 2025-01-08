@@ -1,10 +1,10 @@
 pub use crate::cbmtypes::CbmDeviceInfo;
-use crate::opencbm::{OpenCbm, OpenCbmError};
-use crate::cbmtypes::{CbmDeviceType};
+use crate::opencbm::{OpenCbm, ascii_to_petscii};
+use crate::cbmtypes::{CbmDeviceType, CbmError};
 
 use log::debug;
 use parking_lot::Mutex;
-use libc::{EBUSY, EIO, ENOENT, ENOTSUP};
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashMap;
@@ -15,131 +15,6 @@ use std::fmt;
 #[derive(Debug)]
 pub struct Cbm {
     handle: Mutex<OpenCbm>,
-}
-
-#[derive(Debug)]
-pub enum CbmError {
-    /// Device not responding or connection issues 
-    DeviceError(String),
-    /// Channel allocation failed
-    ChannelError(String),
-    /// File operation failed (read/write/open/close)
-    FileError(String),
-    /// Command execution failed
-    CommandError(String),
-    /// Format operation failed
-    FormatError(String),
-    /// Timeout during operation
-    TimeoutError,
-    /// Invalid parameters or state
-    InvalidOperation(String),
-    /// OpenCBM specific errors
-    OpenCbmError(OpenCbmError),
-    /// Maps to specific errno for FUSE
-    FuseError(i32),
-}
-
-impl From<OpenCbmError> for CbmError {
-    fn from(error: OpenCbmError) -> Self {
-        match error {
-            OpenCbmError::ConnectionError(msg) => CbmError::DeviceError(msg),
-            OpenCbmError::ThreadTimeout => CbmError::TimeoutError,
-            OpenCbmError::UnknownDevice(msg) => CbmError::DeviceError(msg),
-            OpenCbmError::ThreadPanic => CbmError::DeviceError("Thread panic during device operation".into()),
-            OpenCbmError::Other(msg) => CbmError::DeviceError(msg),
-        }
-    }
-}
-
-impl CbmError {
-    /// Convert the error to a FUSE-compatible errno
-    pub fn to_errno(&self) -> i32 {
-        match self {
-            CbmError::DeviceError(_) => EIO,
-            CbmError::ChannelError(_) => EBUSY,
-            CbmError::FileError(_) => ENOENT,
-            CbmError::CommandError(_) => EIO,
-            CbmError::FormatError(_) => EIO,
-            CbmError::TimeoutError => EIO,
-            CbmError::InvalidOperation(_) => ENOTSUP,
-            CbmError::OpenCbmError(_) => EIO,
-            CbmError::FuseError(errno) => *errno,
-        }
-    }
-}
-
-impl fmt::Display for CbmError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CbmError::DeviceError(msg) => write!(f, "Device error: {}", msg),
-            CbmError::ChannelError(msg) => write!(f, "Channel error: {}", msg),
-            CbmError::FileError(msg) => write!(f, "File operation error: {}", msg),
-            CbmError::CommandError(msg) => write!(f, "Command error: {}", msg),
-            CbmError::FormatError(msg) => write!(f, "Format error: {}", msg),
-            CbmError::TimeoutError => write!(f, "Operation timed out"),
-            CbmError::InvalidOperation(msg) => write!(f, "Invalid operation: {}", msg),
-            CbmError::OpenCbmError(e) => write!(f, "OpenCBM error: {}", e),
-            CbmError::FuseError(errno) => {
-                let msg = match *errno {
-                    libc::EBUSY => "Device or resource busy",
-                    libc::EIO => "Input/output error",
-                    libc::ENOENT => "No such file or directory",
-                    libc::ENOSPC => "No space left on device",
-                    libc::ENOTSUP => "Operation not supported",
-                    _ => "Unknown error"
-                };
-                write!(f, "Filesystem error ({}): {}", errno, msg)
-            }
-        }
-    }
-}
-
-// Implement std::error::Error for more complete error handling
-impl std::error::Error for CbmError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            CbmError::OpenCbmError(e) => Some(e),
-            _ => None
-        }
-    }
-}
-
-// File types supported by CBM drives
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CbmFileType {
-    PRG,  // Program file
-    SEQ,  // Sequential file
-    USR,  // User file
-    REL,  // Relative file
-}
-
-// File open modes
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CbmFileMode {
-    Read,
-    Write,
-    Append,
-}
-
-impl CbmFileType {
-    fn to_suffix(&self) -> &'static str {
-        match self {
-            CbmFileType::PRG => ",P",
-            CbmFileType::SEQ => ",S", 
-            CbmFileType::USR => ",U",
-            CbmFileType::REL => ",R",
-        }
-    }
-}
-
-impl CbmFileMode {
-    fn to_suffix(&self) -> &'static str {
-        match self {
-            CbmFileMode::Read => "",
-            CbmFileMode::Write => ",W",
-            CbmFileMode::Append => ",A",
-        }
-    }
 }
 
 impl Cbm {
@@ -225,7 +100,7 @@ impl Cbm {
         cbm_guard.listen(device, 15).map_err(|e| CbmError::CommandError(format!("Listen failed: {}", e)))?;
         
         // Convert command to PETSCII and send
-        let cmd_bytes = cbm_guard.ascii_to_petscii(command);
+        let cmd_bytes = ascii_to_petscii(command);
         let result = cbm_guard.raw_write(&cmd_bytes)
             .map_err(|e| CbmError::CommandError(format!("Write failed: {}", e)))?;
             
@@ -379,27 +254,14 @@ impl Cbm {
 /// - Bits 40-47: Channel number (0-15)
 /// - Bits 0-39:  Sequence number
 #[derive(Debug, Clone, Copy)]
-struct FileHandle {
+struct CbmFileHandle {
     device_number: u8,
     drive_id: u8,
     channel_number: u8,
     sequence: u64,
 }
 
-/// Types of operations that can be performed on a CBM disk drive
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CbmOperationType {
-    /// Reading file contents or attributes
-    Read,
-    /// Writing file contents or attributes
-    Write,
-    /// Reading or updating directory contents
-    Directory,
-    /// Control operations like reset
-    Control,
-}
-
-impl FileHandle {
+impl CbmFileHandle {
     fn new(device_number: u8, drive_id: u8, channel_number: u8, sequence: u64) -> Self {
         Self {
             device_number,
@@ -431,15 +293,15 @@ impl FileHandle {
 /// Channels are the primary means of communication with CBM drives. Each drive
 /// supports 16 channels (0-15), with channel 15 reserved for control operations.
 #[derive(Debug, Clone)]
-pub struct Channel {
+pub struct CbmChannel {
     number: u8,
-    purpose: ChannelPurpose,
-    handle: Option<FileHandle>, // Present when allocated for file operations
+    purpose: CbmChannelPurpose,
+    handle: Option<CbmFileHandle>, // Present when allocated for file operations
 }
 
 /// Purpose for which a channel is being used
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChannelPurpose {
+pub enum CbmChannelPurpose {
     Reset,     // Channel 15 - reserved for reset commands
     Directory, // Reading directory
     FileRead,  // Reading a file
@@ -453,7 +315,7 @@ pub enum ChannelPurpose {
 /// the invariant that channel 15 is only used for reset operations.
 #[derive(Debug)]
 pub struct CbmChannelManager {
-    channels: HashMap<u8, Option<Channel>>,
+    channels: HashMap<u8, Option<CbmChannel>>,
     next_sequence: AtomicU64,
 }
 
@@ -477,15 +339,15 @@ impl CbmChannelManager {
         &mut self,
         device_number: u8,
         drive_id: u8,
-        purpose: ChannelPurpose,
+        purpose: CbmChannelPurpose,
     ) -> Option<(u8, u64)> {
         // Channel 15 handling
-        if purpose == ChannelPurpose::Reset {
+        if purpose == CbmChannelPurpose::Reset {
             if let Some(slot) = self.channels.get_mut(&15) {
                 if slot.is_none() {
                     let sequence = self.next_sequence.fetch_add(1, Ordering::SeqCst);
-                    let handle = FileHandle::new(device_number, drive_id, 15, sequence);
-                    *slot = Some(Channel {
+                    let handle = CbmFileHandle::new(device_number, drive_id, 15, sequence);
+                    *slot = Some(CbmChannel {
                         number: 15,
                         purpose,
                         handle: Some(handle),
@@ -501,8 +363,8 @@ impl CbmChannelManager {
             if let Some(slot) = self.channels.get_mut(&i) {
                 if slot.is_none() {
                     let sequence = self.next_sequence.fetch_add(1, Ordering::SeqCst);
-                    let handle = FileHandle::new(device_number, drive_id, i, sequence);
-                    *slot = Some(Channel {
+                    let handle = CbmFileHandle::new(device_number, drive_id, i, sequence);
+                    *slot = Some(CbmChannel {
                         number: i,
                         purpose,
                         handle: Some(handle),
@@ -514,13 +376,13 @@ impl CbmChannelManager {
         None
     }
 
-    pub fn get_channel(&self, handle: u64) -> Option<&Channel> {
-        let decoded = FileHandle::from_u64(handle);
+    pub fn get_channel(&self, handle: u64) -> Option<&CbmChannel> {
+        let decoded = CbmFileHandle::from_u64(handle);
         self.channels.get(&decoded.channel_number)?.as_ref()
     }
 
     pub fn deallocate(&mut self, handle: u64) {
-        let decoded = FileHandle::from_u64(handle);
+        let decoded = CbmFileHandle::from_u64(handle);
         if let Some(slot) = self.channels.get_mut(&decoded.channel_number) {
             if let Some(channel) = slot {
                 if channel
@@ -540,15 +402,6 @@ impl CbmChannelManager {
     }
     
 }
-
-/// Represents an active operation on a mountpoint
-#[derive(Debug)]
-struct Operation {
-    op_type: CbmOperationType,
-    count: usize,
-    has_write: bool, // True if any current operation is a write
-}
-
 
 /// Represents a physical drive unit
 ///

@@ -332,56 +332,57 @@ impl OpenCbm {
         })
     }
 
-    /// Convert ASCII string to PETSCII
-    pub fn ascii_to_petscii(&self, input: &str) -> Vec<u8> {
-        let mut input_vec = input.as_bytes().to_vec();
-        
-        // Need to convert to *mut i8 and ensure it's null-terminated
-        input_vec.push(0); // Add null terminator
-        
-        unsafe {
-            // Call the FFI function with the correct type
-            let input_ptr = input_vec.as_mut_ptr() as *mut i8;
-            let result = cbm_ascii2petscii(input_ptr);
-            
-            // Convert the result back to a Vec<u8>
-            let mut output = Vec::new();
-            let mut current = result;
-            while !current.is_null() {
-                let byte = *current as u8;
-                if byte == 0 { break; }
-                output.push(byte);
-                current = current.add(1);
-            }
-            
-            output
-        }
-    }
+}
 
-    /// Convert PETSCII to ASCII string
-    pub fn petscii_to_ascii(&self, input: &[u8]) -> String {
-        let mut input_vec = input.to_vec();
+/// Convert ASCII string to PETSCII
+pub fn ascii_to_petscii(input: &str) -> Vec<u8> {
+    let mut input_vec = input.as_bytes().to_vec();
+    
+    // Need to convert to *mut i8 and ensure it's null-terminated
+    input_vec.push(0); // Add null terminator
+    
+    unsafe {
+        // Call the FFI function with the correct type
+        let input_ptr = input_vec.as_mut_ptr() as *mut i8;
+        let result = cbm_ascii2petscii(input_ptr);
         
-        // Add null terminator
-        input_vec.push(0);
-        
-        unsafe {
-            // Call the FFI function with the correct type
-            let input_ptr = input_vec.as_mut_ptr() as *mut i8;
-            let result = cbm_petscii2ascii(input_ptr);
-            
-            // Convert the result to a String
-            let mut output = Vec::new();
-            let mut current = result;
-            while !current.is_null() {
-                let byte = *current as u8;
-                if byte == 0 { break; }
-                output.push(byte);
-                current = current.add(1);
-            }
-            
-            String::from_utf8_lossy(&output).into_owned()
+        // Convert the result back to a Vec<u8>
+        let mut output = Vec::new();
+        let mut current = result;
+        while !current.is_null() {
+            let byte = *current as u8;
+            if byte == 0 { break; }
+            output.push(byte);
+            current = current.add(1);
         }
+        
+        output
+    }
+}
+
+/// Convert PETSCII to ASCII string
+pub fn petscii_to_ascii(input: &[u8]) -> String {
+    let mut input_vec = input.to_vec();
+    
+    // Add null terminator
+    input_vec.push(0);
+    
+    unsafe {
+        // Call the FFI function with the correct type
+        let input_ptr = input_vec.as_mut_ptr() as *mut i8;
+        let result = cbm_petscii2ascii(input_ptr);
+        
+        // Convert the result to a String
+        let mut output = Vec::new();
+        let mut current = result;
+        while !current.is_null() {
+            let byte = *current as u8;
+            if byte == 0 { break; }
+            output.push(byte);
+            current = current.add(1);
+        }
+        
+        String::from_utf8_lossy(&output).into_owned()
     }
 }
 
