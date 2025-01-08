@@ -182,13 +182,8 @@ fn handle_get_status(cbm: &Arc<Mutex<Cbm>>, device: u8) -> Result<Response, Daem
     let guard = cbm.lock();
     guard
         .get_status(device)
-        .inspect(|status| {
-            debug!(
-                "Get status completed successfully: {} (output is capped at 40 bytes)",
-                &status[..status.len().min(40)]
-            )
-        })
-        .map(|status| Ok(Response::GotStatus(status)))?
+        .inspect(|status| debug!("Get status completed successfully: {}", status))
+        .map(|status| Ok(Response::GotStatus(status.to_string())))?
 }
 
 fn send_response(stream: &mut UnixStream, response: Response) -> Result<()> {

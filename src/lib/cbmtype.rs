@@ -1,6 +1,6 @@
 use crate::opencbm::OpenCbmError;
 
-use libc::{EBUSY, EINVAL, EIO, ENOENT, ENOTSUP};
+use libc::{EBUSY, EINVAL, EIO, ENOENT, ENOTSUP, EPERM};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::fmt;
@@ -15,8 +15,8 @@ pub enum CbmError {
     FileError(String),
     /// Command execution failed
     CommandError(String),
-    /// Format operation failed
-    FormatError(String),
+    /// Drive returned error status
+    StatusError(CbmStatus),
     /// Timeout during operation
     TimeoutError,
     /// Invalid parameters or state
@@ -52,6 +52,12 @@ impl From<OpenCbmError> for CbmError {
     }
 }
 
+impl From<CbmStatus> for CbmError {
+    fn from(status: CbmStatus) -> Self {
+        CbmError::StatusError(status)
+    }
+}
+
 impl CbmError {
     /// Convert the error to a FUSE-compatible errno
     pub fn to_errno(&self) -> i32 {
@@ -60,12 +66,12 @@ impl CbmError {
             CbmError::ChannelError(_) => EBUSY,
             CbmError::FileError(_) => ENOENT,
             CbmError::CommandError(_) => EIO,
-            CbmError::FormatError(_) => EIO,
             CbmError::TimeoutError => EIO,
             CbmError::InvalidOperation(_) => ENOTSUP,
             CbmError::OpenCbmError(_) => EIO,
             CbmError::FuseError(errno) => *errno,
             CbmError::ValidationError(_) => EINVAL,
+            CbmError::StatusError(_) => EPERM,
         }
     }
 }
@@ -77,7 +83,6 @@ impl fmt::Display for CbmError {
             CbmError::ChannelError(msg) => write!(f, "Channel error: {}", msg),
             CbmError::FileError(msg) => write!(f, "File operation error: {}", msg),
             CbmError::CommandError(msg) => write!(f, "Command error: {}", msg),
-            CbmError::FormatError(msg) => write!(f, "Format error: {}", msg),
             CbmError::TimeoutError => write!(f, "Operation timed out"),
             CbmError::InvalidOperation(msg) => write!(f, "Invalid operation: {}", msg),
             CbmError::OpenCbmError(e) => write!(f, "OpenCBM error: {}", e),
@@ -93,6 +98,9 @@ impl fmt::Display for CbmError {
                 write!(f, "Filesystem error ({}): {}", errno, msg)
             }
             CbmError::ValidationError(e) => write!(f, "Validation error: {}", e),
+            CbmError::StatusError(status) => {
+                write!(f, "Drive returned error status: {}", status.to_string())
+            }
         }
     }
 }
@@ -305,12 +313,7 @@ impl CbmStatus {
 
     /// Returns true if this status represents an error condition
     pub fn is_error(&self) -> bool {
-        // Codes that are not errors:
-        // 00 - OK
-        // 01 - FILES SCRATCHED (number in detail1)
-        // 50 - RECORD NOT PRESENT
-        // Add others as discovered from CBM DOS documentation
-        !matches!(self.code, 0 | 1 | 50)
+        !self.is_ok()
     }
 
     /// Get the track number for errors where detail1 represents a track
@@ -356,6 +359,14 @@ impl CbmStatus {
     }
 }
 
+impl TryFrom<&str> for CbmStatus {
+    type Error = CbmError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        Self::new(s)
+    }
+}
+
 impl fmt::Display for CbmStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.is_ok() {
@@ -366,6 +377,16 @@ impl fmt::Display for CbmStatus {
             write!(f, "{} at track {} sector {}", self.message, track, sector)
         } else {
             write!(f, "{}", self.message)
+        }
+    }
+}
+
+/// going from status directly to this return type is common so make it easy
+impl Into<Result<(), CbmError>> for CbmStatus {
+    fn into(self) -> Result<(), CbmError> {
+        match self.is_ok() {
+            true => Ok(()),
+            false => Err(self.into()),
         }
     }
 }
@@ -405,14 +426,6 @@ impl CbmFileMode {
             CbmFileMode::Write => ",W",
             CbmFileMode::Append => ",A",
         }
-    }
-}
-
-impl TryFrom<&str> for CbmStatus {
-    type Error = CbmError;
-
-    fn try_from(s: &str) -> Result<Self, Self::Error> {
-        Self::new(s)
     }
 }
 

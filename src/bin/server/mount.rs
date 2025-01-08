@@ -122,7 +122,11 @@ impl Mountpoint {
         // state in the drive.  We could also decide to do a soft reset of
         // the drive at this point.
         let mut guard = self.drive_unit.write();
-        guard.send_init(&self.cbm).map(|x| Ok(x))?
+
+        guard
+            .send_init(&self.cbm)
+            .inspect(|status_vec| debug!("Status from drive: {:?}", status_vec))
+            .map(|_| Ok(()))?
     }
 
     pub fn unmount(&mut self) -> Result<(), DaemonError> {

@@ -1,5 +1,5 @@
 pub use crate::cbmtype::CbmDeviceInfo;
-use crate::cbmtype::{CbmDeviceType, CbmError};
+use crate::cbmtype::{CbmDeviceType, CbmError, CbmStatus};
 use crate::opencbm::{ascii_to_petscii, OpenCbm};
 
 use log::debug;
@@ -48,7 +48,7 @@ impl Cbm {
         Ok(device_info)
     }
 
-    pub fn get_status(&self, device: u8) -> Result<String, CbmError> {
+    pub fn get_status(&self, device: u8) -> Result<CbmStatus, CbmError> {
         let cbm_guard = self.handle.lock();
 
         // Try and capture 256 bytes.  We won't get that many - cbmctrl only
@@ -93,7 +93,7 @@ impl Cbm {
             status.replace("#015", "\n")
         };
 
-        Ok(processed.trim().to_string())
+        CbmStatus::new(processed.trim()).map(|s| Ok(s))?
     }
 
     /// Send a command to the specified device on channel 15
@@ -141,12 +141,7 @@ impl Cbm {
         self.send_command(device, &cmd)?;
 
         // Check status after format
-        let status = self.get_status(device)?;
-        if !status.starts_with("00,") {
-            return Err(CbmError::FormatError(status));
-        }
-
-        Ok(())
+        self.get_status(device)?.into()
     }
 
     /// Read file from disk
@@ -163,11 +158,8 @@ impl Cbm {
 
         // Check status after open
         let status = self.get_status(device)?;
-        if !status.starts_with("00,") {
-            return Err(CbmError::FileError(format!(
-                "Failed to open file: {}",
-                status
-            )));
+        if status.is_error() {
+            return Err(status.into());
         }
 
         // Now read the file data
@@ -208,11 +200,8 @@ impl Cbm {
 
         // Check status after open
         let status = self.get_status(device)?;
-        if !status.starts_with("00,") {
-            return Err(CbmError::FileError(format!(
-                "Failed to open file for writing: {}",
-                status
-            )));
+        if status.is_error() {
+            return Err(status.into());
         }
 
         // Now write the file data
@@ -246,12 +235,7 @@ impl Cbm {
         self.send_command(device, &cmd)?;
 
         // Check status after delete
-        let status = self.get_status(device)?;
-        if !status.starts_with("00,") {
-            return Err(CbmError::FileError(status));
-        }
-
-        Ok(())
+        self.get_status(device)?.into()
     }
 
     /// Validate disk (collect garbage, verify BAM)
@@ -260,12 +244,7 @@ impl Cbm {
         self.send_command(device, "V")?;
 
         // Check status after validation
-        let status = self.get_status(device)?;
-        if !status.starts_with("00,") {
-            return Err(CbmError::CommandError(status));
-        }
-
-        Ok(())
+        self.get_status(device)?.into()
     }
 }
 
@@ -455,17 +434,26 @@ impl CbmDriveUnit {
         }
     }
 
-    pub fn send_init(&mut self, cbm: &Arc<Mutex<Cbm>>) -> Result<(), CbmError> {
+    pub fn send_init(&mut self, cbm: &Arc<Mutex<Cbm>>) -> Result<Vec<CbmStatus>, CbmError> {
         let guard = cbm.lock();
 
         // First ? catches panic and maps to CbmError
-        // The catch_unwind returns the return type of this fn, so doesn't
-        // need a ?
+        // Second > propogates CbmError (from first, or from within {})
+        let mut status_vec: Vec<CbmStatus> = Vec::new();
         catch_unwind(AssertUnwindSafe(|| {
             self.num_disk_drives_iter().try_for_each(|ii| {
-                guard.send_command(self.device_number, format!("i{}", ii).as_ref())
+                let cmd = format!("i{}", ii);
+                guard.send_command(self.device_number, &cmd)?;
+                let status = guard.get_status(self.device_number)?;
+                if status.is_error() {
+                    return Err(CbmError::CommandError(format!("{} {}", cmd, status)));
+                }
+                status_vec.push(status);
+                Ok(())
             })
-        }))?
+        }))??;
+
+        Ok(status_vec)
     }
 
     pub fn reset(&mut self) -> Result<(), CbmError> {
