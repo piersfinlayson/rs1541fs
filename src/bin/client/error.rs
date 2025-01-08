@@ -5,6 +5,24 @@ pub enum ClientError {
     InternalError(String),
     ConfigurationError(String),
     ValidationError(String),
+    DaemonStartup(String),
+    Timeout(u64),
+    IPC(String),
+    Protocol(String),
+}
+
+impl std::fmt::Display for ClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClientError::ConfigurationError(msg) => write!(f, "Configuration error: {}", msg),
+            ClientError::ValidationError(msg) => write!(f, "Validation error: {}", msg),
+            ClientError::InternalError(e) => write!(f, "Internal error: {}", e),
+            ClientError::DaemonStartup(msg) => write!(f, "Daemon failed to start: {}", msg),
+            ClientError::Timeout(secs) => write!(f, "Operation timed out after {} seconds", secs),
+            ClientError::IPC(msg) => write!(f, "IPC error: {}", msg),
+            ClientError::Protocol(msg) => write!(f, "Protocol error: {}", msg),
+        }
+    }
 }
 
 // Implement automatic conversion from CbmError to ClientError
@@ -15,16 +33,6 @@ impl From<CbmError> for ClientError {
             other => {
                 ClientError::InternalError(format!("Unepected error from CBM library: {}", other))
             } // Should't happen
-        }
-    }
-}
-
-impl std::fmt::Display for ClientError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ClientError::ConfigurationError(msg) => write!(f, "Configuration error: {}", msg),
-            ClientError::ValidationError(msg) => write!(f, "Validation error: {}", msg),
-            ClientError::InternalError(e) => write!(f, "Internal error: {}", e),
         }
     }
 }

@@ -1,5 +1,5 @@
-mod args;
 mod error;
+mod args;
 
 use args::{Args, ClientOperation};
 #[cfg(not(test))]
@@ -7,6 +7,8 @@ use rs1541fs::ipc::SOCKET_PATH;
 use rs1541fs::ipc::{Request, Response};
 use rs1541fs::ipc::{DAEMON_PID_FILENAME, DAEMON_PNAME};
 use rs1541fs::logging::init_logging;
+
+use crate::error::ClientError;
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
@@ -29,20 +31,6 @@ const OPERATION_TIMEOUT: Duration = Duration::from_millis(100);
 const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(1000);
 const MAX_RESPONSE_SIZE: usize = 1024 * 1024; // 1MB limit
 
-#[derive(thiserror::Error, Debug)]
-pub enum ClientError {
-    #[error("Daemon failed to start: {0}")]
-    DaemonStartup(String),
-    #[error("Operation timed out after {0} seconds")]
-    Timeout(u64),
-    #[error("IPC error: {0}")]
-    IPC(String),
-    #[error("Protocol error: {0}")]
-    Protocol(String),
-    #[error("Invalid arguments: {0}")]
-    InvalidArgs(String),
-}
-
 fn check_daemon_health() -> Result<(), ClientError> {
     let request = Request::Ping;
     let response = send_request(request)?;
@@ -51,11 +39,6 @@ fn check_daemon_health() -> Result<(), ClientError> {
         Response::Pong => Ok(()),
         _ => Err(ClientError::Protocol("Invalid ping response".into())),
     }
-}
-
-#[cfg(not(test))]
-fn read_proc_cmdline(pid: u32) -> std::io::Result<String> {
-    std::fs::read_to_string(format!("/proc/{}/cmdline", pid))
 }
 
 fn verify_daemon_process(pid_file: &Path) -> Result<(), ClientError> {
@@ -150,11 +133,6 @@ fn ensure_daemon_running() -> Result<(), ClientError> {
 
     warn!("Failed to start daemon");
     Err(ClientError::Timeout(STARTUP_TIMEOUT.as_secs()))
-}
-
-#[cfg(not(test))]
-fn get_socket_path() -> &'static str {
-    SOCKET_PATH
 }
 
 fn send_request(request: Request) -> Result<Response, ClientError> {
@@ -317,22 +295,21 @@ fn main() -> Result<()> {
     }
 }
 
-#[cfg(test)]
-use mockall::mock;
-#[cfg(test)]
-use mockall::predicate::*;
-#[cfg(test)]
-use std::path::PathBuf;
-#[cfg(test)]
-use std::sync::Mutex;
-
-#[cfg(test)]
-lazy_static::lazy_static! {
-    static ref TEST_SOCKET_PATH: Mutex<PathBuf> = Mutex::new(PathBuf::from("/tmp/test.sock"));
+// Production versions of the functions
+#[cfg(not(test))]
+fn get_socket_path() -> &'static str {
+    SOCKET_PATH
 }
 
 #[cfg(test)]
 fn get_socket_path() -> String {
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    
+    lazy_static::lazy_static! {
+        static ref TEST_SOCKET_PATH: Mutex<PathBuf> = Mutex::new(PathBuf::from("/tmp/test.sock"));
+    }
+    
     TEST_SOCKET_PATH
         .lock()
         .unwrap()
@@ -340,10 +317,14 @@ fn get_socket_path() -> String {
         .into_owned()
 }
 
+#[cfg(not(test))]
+fn read_proc_cmdline(pid: u32) -> std::io::Result<String> {
+    std::fs::read_to_string(format!("/proc/{}/cmdline", pid))
+}
+
 #[cfg(test)]
 fn read_proc_cmdline(pid: u32) -> std::io::Result<String> {
     if pid > 999999 {
-        // Assume very high PIDs are invalid
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "Process not found",
@@ -353,185 +334,205 @@ fn read_proc_cmdline(pid: u32) -> std::io::Result<String> {
 }
 
 #[cfg(test)]
-// Mock UnixStream for testing IPC
-mock! {
-    UnixStream {}
-    impl Read for UnixStream {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize>;
+mod test {
+    use super::*;
+    use rs1541fs::ipc::{Request, Response};
+    use crate::args::ClientOperation;
+    use anyhow::Result;
+    use std::io::{Read, Write};
+    use std::process::Command;
+
+    // Test helper functions
+    fn create_pid_file(pid: u32) -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(file.as_file(), "{}", pid).unwrap();
+        file
     }
-    impl Write for UnixStream {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize>;
-        fn flush(&mut self) -> std::io::Result<()>;
-    }
-}
 
-#[cfg(test)]
-// Helper to create a mock PID file
-fn create_pid_file(pid: u32) -> tempfile::NamedTempFile {
-    let file = tempfile::NamedTempFile::new().unwrap();
-    writeln!(file.as_file(), "{}", pid).unwrap();
-    file
-}
+    // Mocks
+    mod mocks {
+        use super::*;
+        use mockall::mock;
 
-#[test]
-fn test_verify_daemon_process_success() {
-    // Create temp file with current process ID
-    let pid = std::process::id();
-    let pid_file = create_pid_file(pid);
-
-    // Since read_proc_cmdline is mocked in test mode to return "{DAEMON_PNAME}\0args"
-    // and verify_daemon_process checks that the first part matches DAEMON_PNAME,
-    // this should now succeed
-    assert!(verify_daemon_process(pid_file.path()).is_ok());
-}
-
-#[test]
-fn test_verify_daemon_process_invalid_pid() {
-    let pid_file = create_pid_file(99999999); // Invalid PID
-    assert!(matches!(
-        verify_daemon_process(pid_file.path()),
-        Err(ClientError::DaemonStartup(_))
-    ));
-}
-
-#[test]
-fn test_create_request_mount() {
-    let operation = ClientOperation::Mount {
-        device: 8,
-        dummy_formats: true,
-        mountpoint: "/test/mount".to_string(),
-        path: None,
-    };
-
-    let request = create_request(operation);
-    match request {
-        Request::Mount {
-            mountpoint,
-            device,
-            dummy_formats,
-            bus_reset,
-        } => {
-            assert_eq!(mountpoint, "/test/mount");
-            assert_eq!(device, 8);
-            assert!(dummy_formats);
-            assert!(!bus_reset);
+        mock! {
+            UnixStream {}
+            impl Read for UnixStream {
+                fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize>;
+            }
+            impl Write for UnixStream {
+                fn write(&mut self, buf: &[u8]) -> std::io::Result<usize>;
+                fn flush(&mut self) -> std::io::Result<()>;
+            }
         }
-        _ => panic!("Expected Mount request"),
     }
-}
 
-#[test]
-fn test_create_request_unmount() {
-    let operation = ClientOperation::Unmount {
-        device: Some(8),
-        mountpoint: Some("/test/mount".to_string()),
-        path: None,
-    };
+    mod daemon_tests {
+        use super::*;
 
-    let request = create_request(operation);
-    match request {
-        Request::Unmount { mountpoint, device } => {
-            assert_eq!(mountpoint, Some("/test/mount".to_string()));
-            assert_eq!(device, Some(8));
+        #[test]
+        fn test_verify_daemon_process_success() {
+            let pid = std::process::id();
+            let pid_file = create_pid_file(pid);
+
+            assert!(verify_daemon_process(pid_file.path()).is_ok());
         }
-        _ => panic!("Expected Unmount request"),
-    }
-}
 
-#[test]
-fn test_create_request_unmount_device_only() {
-    let operation = ClientOperation::Unmount {
-        device: Some(8),
-        mountpoint: None,
-        path: None,
-    };
-
-    let request = create_request(operation);
-    match request {
-        Request::Unmount { mountpoint, device } => {
-            assert_eq!(mountpoint, None);
-            assert_eq!(device, Some(8));
+        #[test]
+        fn test_verify_daemon_process_invalid_pid() {
+            let pid_file = create_pid_file(99999999);
+            assert!(matches!(
+                verify_daemon_process(pid_file.path()),
+                Err(ClientError::DaemonStartup(_))
+            ));
         }
-        _ => panic!("Expected Unmount request"),
-    }
-}
 
-#[test]
-fn test_create_request_identify() {
-    let operation = ClientOperation::Identify { device: 8 };
+        #[test]
+        fn test_command_env_if_exists() {
+            std::env::set_var("TEST_VAR", "test_value");
+            let mut cmd = Command::new("test");
+            cmd.env_if_exists("TEST_VAR");
 
-    let request = create_request(operation);
-    match request {
-        Request::Identify { device } => {
-            assert_eq!(device, 8);
+            let envs: Vec<_> = cmd.get_envs().collect();
+            assert!(envs.iter().any(|(key, value)| {
+                key.to_str().unwrap() == "TEST_VAR" && value.unwrap().to_str().unwrap() == "test_value"
+            }));
         }
-        _ => panic!("Expected Identify request"),
     }
-}
 
-#[test]
-fn test_create_request_resetbus() {
-    let operation = ClientOperation::Resetbus;
-    let request = create_request(operation);
-    assert!(matches!(request, Request::BusReset));
-}
+    mod request_tests {
+        use super::*;
 
-#[test]
-fn test_create_request_kill() {
-    let operation = ClientOperation::Kill;
-    let request = create_request(operation);
-    assert!(matches!(request, Request::Die));
-}
+        #[test]
+        fn test_create_request_mount() {
+            let operation = ClientOperation::Mount {
+                device: 8,
+                dummy_formats: true,
+                mountpoint: "/test/mount".to_string(),
+                path: None,
+            };
 
-#[test]
-fn test_command_env_if_exists() {
-    std::env::set_var("TEST_VAR", "test_value");
-    let mut cmd = Command::new("test");
-    cmd.env_if_exists("TEST_VAR");
+            let request = create_request(operation);
+            match request {
+                Request::Mount {
+                    mountpoint,
+                    device,
+                    dummy_formats,
+                    bus_reset,
+                } => {
+                    assert_eq!(mountpoint, "/test/mount");
+                    assert_eq!(device, 8);
+                    assert!(dummy_formats);
+                    assert!(!bus_reset);
+                }
+                _ => panic!("Expected Mount request"),
+            }
+        }
 
-    // Get environment from Command
-    let envs: Vec<_> = cmd.get_envs().collect();
-    assert!(envs.iter().any(|(key, value)| {
-        key.to_str().unwrap() == "TEST_VAR" && value.unwrap().to_str().unwrap() == "test_value"
-    }));
-}
+        #[test]
+        fn test_create_request_unmount() {
+            let operation = ClientOperation::Unmount {
+                device: Some(8),
+                mountpoint: Some("/test/mount".to_string()),
+                path: None,
+            };
 
-#[test]
-fn test_response_handling() {
-    let test_cases = vec![
-        (Response::Error("test error".into()), true),
-        (Response::MountSuccess, false),
-        (Response::UnmountSuccess, false),
-        (Response::BusResetSuccess, false),
-        (Response::Pong, false),
-        (Response::Dying, false),
-        (
-            Response::Identified {
-                device_type: "Test Device".into(),
-                description: "Test Description".into(),
-            },
-            false,
-        ),
-    ];
+            let request = create_request(operation);
+            match request {
+                Request::Unmount { mountpoint, device } => {
+                    assert_eq!(mountpoint, Some("/test/mount".to_string()));
+                    assert_eq!(device, Some(8));
+                }
+                _ => panic!("Expected Unmount request"),
+            }
+        }
 
-    for (response, should_error) in test_cases {
-        let operation = ClientOperation::Identify { device: 8 };
-        let result = handle_response(&response, &create_request(operation));
-        assert_eq!(result.is_err(), should_error);
+        #[test]
+        fn test_create_request_unmount_device_only() {
+            let operation = ClientOperation::Unmount {
+                device: Some(8),
+                mountpoint: None,
+                path: None,
+            };
+
+            let request = create_request(operation);
+            match request {
+                Request::Unmount { mountpoint, device } => {
+                    assert_eq!(mountpoint, None);
+                    assert_eq!(device, Some(8));
+                }
+                _ => panic!("Expected Unmount request"),
+            }
+        }
+
+        #[test]
+        fn test_create_request_identify() {
+            let operation = ClientOperation::Identify { device: 8 };
+
+            let request = create_request(operation);
+            match request {
+                Request::Identify { device } => {
+                    assert_eq!(device, 8);
+                }
+                _ => panic!("Expected Identify request"),
+            }
+        }
+
+        #[test]
+        fn test_create_request_resetbus() {
+            let operation = ClientOperation::Resetbus;
+            let request = create_request(operation);
+            assert!(matches!(request, Request::BusReset));
+        }
+
+        #[test]
+        fn test_create_request_kill() {
+            let operation = ClientOperation::Kill;
+            let request = create_request(operation);
+            assert!(matches!(request, Request::Die));
+        }
     }
-}
 
-// Helper function for testing response handling
-#[cfg(test)]
-fn handle_response(response: &Response, _request: &Request) -> Result<()> {
-    match response {
-        Response::Error(err) => Err(anyhow!("Operation failed: {}", err)),
-        Response::MountSuccess => Ok(()),
-        Response::UnmountSuccess => Ok(()),
-        Response::BusResetSuccess => Ok(()),
-        Response::Pong => Ok(()),
-        Response::Dying => Ok(()),
-        Response::Identified { .. } => Ok(()),
-        Response::GotStatus { .. } => Ok(()),
+    mod response_tests {
+        use super::*;
+
+        #[test]
+        fn test_response_handling() {
+            let test_cases = vec![
+                (Response::Error("test error".into()), true),
+                (Response::MountSuccess, false),
+                (Response::UnmountSuccess, false),
+                (Response::BusResetSuccess, false),
+                (Response::Pong, false),
+                (Response::Dying, false),
+                (
+                    Response::Identified {
+                        device_type: "Test Device".into(),
+                        description: "Test Description".into(),
+                    },
+                    false,
+                ),
+            ];
+
+            for (response, should_error) in test_cases {
+                let operation = ClientOperation::Identify { device: 8 };
+                let result = handle_response(&response, &create_request(operation));
+                assert_eq!(result.is_err(), should_error);
+            }
+        }
+
+        // Helper function for testing response handling
+        // TODO: Consider extracting response handling from main() into a shared function
+        fn handle_response(response: &Response, _request: &Request) -> Result<()> {
+            match response {
+                Response::Error(err) => Err(anyhow::anyhow!("Operation failed: {}", err)),
+                Response::MountSuccess => Ok(()),
+                Response::UnmountSuccess => Ok(()),
+                Response::BusResetSuccess => Ok(()),
+                Response::Pong => Ok(()),
+                Response::Dying => Ok(()),
+                Response::Identified { .. } => Ok(()),
+                Response::GotStatus(_) => Ok(()),
+            }
+        }
     }
 }
