@@ -454,6 +454,7 @@ pub struct CbmDriveUnit {
     pub device_number: u8,
     pub device_type: CbmDeviceType,
     channel_manager: Arc<Mutex<CbmChannelManager>>,
+    busy: bool,
 }
 
 impl fmt::Display for CbmDriveUnit {
@@ -469,6 +470,7 @@ impl CbmDriveUnit {
             device_number,
             device_type,
             channel_manager: Arc::new(Mutex::new(CbmChannelManager::new())),
+            busy: false,
         }
     }
 
@@ -478,6 +480,7 @@ impl CbmDriveUnit {
         ignore_errors: &Vec<CbmErrorNumber>,
     ) -> Result<Vec<CbmStatus>, CbmError> {
         let guard = cbm.lock();
+        self.busy = true;
 
         // First ? catches panic and maps to CbmError
         // Second > propogates CbmError (from first, or from within {})
@@ -485,10 +488,11 @@ impl CbmDriveUnit {
         catch_unwind(AssertUnwindSafe(|| {
             self.num_disk_drives_iter().try_for_each(|ii| {
                 let cmd = format!("i{}", ii);
-                guard.send_command(self.device_number, &cmd)?;
-                let status = guard.get_status(self.device_number)?;
+                guard.send_command(self.device_number, &cmd).inspect_err(|_| self.busy = false)?;
+                let status = guard.get_status(self.device_number).inspect_err(|_| self.busy = false)?;
                 if status.is_ok() != CbmErrorNumberOk::Ok {
                     if !ignore_errors.contains(&status.error_number) {
+                        self.busy = false;
                         return Err(CbmError::CommandError {
                             device: self.device_number,
                             message: format!("{} {}", cmd, status),
@@ -500,13 +504,16 @@ impl CbmDriveUnit {
                 status_vec.push(status);
                 Ok(())
             })
-        }))??;
+        })).inspect_err(|_| self.busy = false)?.inspect_err(|_| self.busy = false)?;
 
+        self.busy = false;
         Ok(status_vec)
     }
 
     pub fn reset(&mut self) -> Result<(), CbmError> {
+        self.busy = true;
         self.channel_manager.lock().reset();
+        self.busy = true;
         Ok(())
     }
 
@@ -516,5 +523,13 @@ impl CbmDriveUnit {
 
     pub fn num_disk_drives_iter(&self) -> impl Iterator<Item = u8> {
         0..self.num_disk_drives()
+    }
+
+    pub fn is_responding(&self) -> bool {
+        true
+    }
+
+    pub fn is_busy(&self) -> bool {
+        self.busy
     }
 }
