@@ -170,7 +170,7 @@ impl fmt::Display for CbmError {
                 };
                 write!(f, "Filesystem error ({}): {}", errno, msg)
             }
-            CbmError::ValidationError (message)=> {
+            CbmError::ValidationError(message) => {
                 write!(f, "Validation error: {}", message)
             }
             CbmError::StatusError { device, status } => {

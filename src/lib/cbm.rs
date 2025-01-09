@@ -488,8 +488,12 @@ impl CbmDriveUnit {
         catch_unwind(AssertUnwindSafe(|| {
             self.num_disk_drives_iter().try_for_each(|ii| {
                 let cmd = format!("i{}", ii);
-                guard.send_command(self.device_number, &cmd).inspect_err(|_| self.busy = false)?;
-                let status = guard.get_status(self.device_number).inspect_err(|_| self.busy = false)?;
+                guard
+                    .send_command(self.device_number, &cmd)
+                    .inspect_err(|_| self.busy = false)?;
+                let status = guard
+                    .get_status(self.device_number)
+                    .inspect_err(|_| self.busy = false)?;
                 if status.is_ok() != CbmErrorNumberOk::Ok {
                     if !ignore_errors.contains(&status.error_number) {
                         self.busy = false;
@@ -504,7 +508,9 @@ impl CbmDriveUnit {
                 status_vec.push(status);
                 Ok(())
             })
-        })).inspect_err(|_| self.busy = false)?.inspect_err(|_| self.busy = false)?;
+        }))
+        .inspect_err(|_| self.busy = false)?
+        .inspect_err(|_| self.busy = false)?;
 
         self.busy = false;
         Ok(status_vec)
