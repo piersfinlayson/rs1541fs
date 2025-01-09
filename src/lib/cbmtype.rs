@@ -9,23 +9,26 @@ use std::fmt;
 #[derive(Debug, PartialEq)]
 pub enum CbmError {
     /// Device not responding or connection issues
-    DeviceError(String),
+    DeviceError { device: u8, message: String },
     /// Channel allocation failed
-    ChannelError(String),
+    ChannelError { device: u8, message: String },
     /// File operation failed (read/write/open/close)
-    FileError(String),
+    FileError { device: u8, message: String },
     /// Command execution failed
-    CommandError(String),
+    CommandError { device: u8, message: String },
     /// Drive returned error status
-    StatusError(CbmStatus),
+    StatusError { device: u8, status: CbmStatus },
     /// Timeout during operation
-    TimeoutError,
+    TimeoutError { device: u8 },
     /// Invalid parameters or state
-    InvalidOperation(String),
+    InvalidOperation { device: u8, message: String },
     /// OpenCBM specific errors
-    OpenCbmError(OpenCbmError),
+    OpenCbmError {
+        device: Option<u8>, // Some operations might not be device-specific
+        error: OpenCbmError,
+    },
     /// Maps to specific errno for FUSE
-    FuseError(i32),
+    FuseError(i32), // No device number as this is filesystem level
     /// Used when validation fails
     ValidationError(String),
 }
@@ -33,7 +36,7 @@ pub enum CbmError {
 impl std::error::Error for CbmError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            CbmError::OpenCbmError(err) => Some(err),
+            CbmError::OpenCbmError { error, .. } => Some(error),
             _ => None,
         }
     }
@@ -42,20 +45,33 @@ impl std::error::Error for CbmError {
 impl From<OpenCbmError> for CbmError {
     fn from(error: OpenCbmError) -> Self {
         match error {
-            OpenCbmError::ConnectionError(msg) => CbmError::DeviceError(msg),
-            OpenCbmError::ThreadTimeout => CbmError::TimeoutError,
-            OpenCbmError::UnknownDevice(msg) => CbmError::DeviceError(msg),
-            OpenCbmError::ThreadPanic => {
-                CbmError::DeviceError("Thread panic during device operation".into())
-            }
-            OpenCbmError::Other(msg) => CbmError::DeviceError(msg),
+            OpenCbmError::ConnectionError(msg) => CbmError::DeviceError {
+                device: 0,
+                message: msg,
+            },
+            OpenCbmError::ThreadTimeout => CbmError::TimeoutError { device: 0 },
+            OpenCbmError::UnknownDevice(msg) => CbmError::DeviceError {
+                device: 0,
+                message: msg,
+            },
+            OpenCbmError::ThreadPanic => CbmError::DeviceError {
+                device: 0,
+                message: "Thread panic during device operation".into(),
+            },
+            OpenCbmError::Other(msg) => CbmError::DeviceError {
+                device: 0,
+                message: msg,
+            },
         }
     }
 }
 
 impl From<CbmStatus> for CbmError {
     fn from(status: CbmStatus) -> Self {
-        CbmError::StatusError(status)
+        CbmError::StatusError {
+            device: status.device,
+            status,
+        }
     }
 }
 
@@ -63,16 +79,24 @@ impl CbmError {
     /// Convert the error to a FUSE-compatible errno
     pub fn to_errno(&self) -> i32 {
         match self {
-            CbmError::DeviceError(_) => EIO,
-            CbmError::ChannelError(_) => EBUSY,
-            CbmError::FileError(_) => ENOENT,
-            CbmError::CommandError(_) => EIO,
-            CbmError::TimeoutError => EIO,
-            CbmError::InvalidOperation(_) => ENOTSUP,
-            CbmError::OpenCbmError(_) => EIO,
+            CbmError::DeviceError { .. } => EIO,
+            CbmError::ChannelError { .. } => EBUSY,
+            CbmError::FileError { .. } => ENOENT,
+            CbmError::CommandError { .. } => EIO,
+            CbmError::TimeoutError { .. } => EIO,
+            CbmError::InvalidOperation { .. } => ENOTSUP,
+            CbmError::OpenCbmError { .. } => EIO,
             CbmError::FuseError(errno) => *errno,
-            CbmError::ValidationError(_) => EINVAL,
-            CbmError::StatusError(_) => EPERM,
+            CbmError::ValidationError { .. } => EINVAL,
+            CbmError::StatusError { .. } => EPERM,
+        }
+    }
+
+    /// Helper function to format device number for display
+    fn format_device(device: Option<u8>) -> String {
+        match device {
+            Some(dev) => format!("Device {}", dev),
+            None => "n/a".to_string(),
         }
     }
 }
@@ -80,13 +104,61 @@ impl CbmError {
 impl fmt::Display for CbmError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CbmError::DeviceError(msg) => write!(f, "Device error: {}", msg),
-            CbmError::ChannelError(msg) => write!(f, "Channel error: {}", msg),
-            CbmError::FileError(msg) => write!(f, "File operation error: {}", msg),
-            CbmError::CommandError(msg) => write!(f, "Command error: {}", msg),
-            CbmError::TimeoutError => write!(f, "Operation timed out"),
-            CbmError::InvalidOperation(msg) => write!(f, "Invalid operation: {}", msg),
-            CbmError::OpenCbmError(e) => write!(f, "OpenCBM error: {}", e),
+            CbmError::DeviceError { device, message } => {
+                write!(
+                    f,
+                    "{}: Device error: {}",
+                    Self::format_device(Some(*device)),
+                    message
+                )
+            }
+            CbmError::ChannelError { device, message } => {
+                write!(
+                    f,
+                    "{}: Channel error: {}",
+                    Self::format_device(Some(*device)),
+                    message
+                )
+            }
+            CbmError::FileError { device, message } => {
+                write!(
+                    f,
+                    "{}: File operation error: {}",
+                    Self::format_device(Some(*device)),
+                    message
+                )
+            }
+            CbmError::CommandError { device, message } => {
+                write!(
+                    f,
+                    "{}: Command error: {}",
+                    Self::format_device(Some(*device)),
+                    message
+                )
+            }
+            CbmError::TimeoutError { device } => {
+                write!(
+                    f,
+                    "{}: Operation timed out",
+                    Self::format_device(Some(*device))
+                )
+            }
+            CbmError::InvalidOperation { device, message } => {
+                write!(
+                    f,
+                    "{}: Invalid operation: {}",
+                    Self::format_device(Some(*device)),
+                    message
+                )
+            }
+            CbmError::OpenCbmError { device, error } => {
+                write!(
+                    f,
+                    "{}: OpenCBM error: {}",
+                    Self::format_device(*device),
+                    error
+                )
+            }
             CbmError::FuseError(errno) => {
                 let msg = match *errno {
                     libc::EBUSY => "Device or resource busy",
@@ -98,40 +170,218 @@ impl fmt::Display for CbmError {
                 };
                 write!(f, "Filesystem error ({}): {}", errno, msg)
             }
-            CbmError::ValidationError(e) => write!(f, "Validation error: {}", e),
-            CbmError::StatusError(status) => {
-                write!(f, "Drive returned error status: {}", status.to_string())
+            CbmError::ValidationError (message)=> {
+                write!(f, "Validation error: {}", message)
+            }
+            CbmError::StatusError { device, status } => {
+                write!(
+                    f,
+                    "{}: Drive returned error status: {}",
+                    Self::format_device(Some(*device)),
+                    status.to_string()
+                )
             }
         }
     }
 }
 
-/// Convert a panic's payload (Box<dyn Any + Send>) into our CbmError type.
-/// This allows errors from catch_unwind to automatically convert into our
-/// error type.
-///
-/// Note that it is theoretically possible other Errs will get dealt with,
-/// with this code - so keep in mind it _might_ not have been a panic depending
-/// on the situation
 impl From<Box<dyn Any + Send>> for CbmError {
     fn from(error: Box<dyn Any + Send>) -> Self {
-        // Try to extract a readable message from the panic payload
         let msg = if let Some(s) = error.downcast_ref::<String>() {
-            // If the panic contained a String (e.g., panic!("my message".to_string())),
-            // extract and clone it
             s.clone()
         } else if let Some(s) = error.downcast_ref::<&str>() {
-            // If the panic contained a string slice (e.g., panic!("literal message")),
-            // convert it to a String
             s.to_string()
         } else {
-            // If we can't interpret the panic payload as any kind of string,
-            // use a generic message
             "Unknown panic".to_string()
         };
 
-        // Wrap the extracted message in our error type
-        CbmError::DeviceError(format!("Panic in opencbm: {}", msg))
+        CbmError::DeviceError {
+            device: 0,
+            message: format!("Panic in opencbm: {}", msg),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CbmStatus {
+    pub number: u8,
+    pub error_number: CbmErrorNumber,
+    pub message: String,
+    pub track: u8,
+    pub sector: u8,
+    pub device: u8,
+}
+
+impl CbmStatus {
+    pub fn new(status: &str, device: u8) -> Result<Self, CbmError> {
+        trace!("Received device status from device {}: {}", device, status);
+        trace!("Status bytes: {:?}", status.as_bytes());
+
+        let clean_status = if let Some(pos) = status.find("\r\0") {
+            &status[..pos]
+        } else {
+            status
+        };
+        let null_count = clean_status
+            .chars()
+            .take(3)
+            .take_while(|&c| c == '\0')
+            .count();
+        let clean_status = &clean_status[null_count..];
+
+        debug!("Received cleaned device status: {}", clean_status);
+
+        let opencbm_error = match clean_status {
+            s if s.starts_with("9, DRIVER ERROR,00,00") => true,
+            s if s.starts_with(", DRIVER ERROR,00,00") => true,
+            s if s.starts_with(" DRIVER ERROR,00,00") => true,
+            _ => false,
+        };
+        if opencbm_error {
+            info!(
+                "Recovered from error receiving status string from opencbm: {}",
+                clean_status
+            );
+            return Ok(Self {
+                number: 99,
+                error_number: CbmErrorNumber::OpenCbm,
+                message: "DRIVER ERROR".to_string(),
+                track: 0,
+                sector: 0,
+                device,
+            });
+        }
+
+        let parts: Vec<&str> = clean_status.split(',').collect();
+        if parts.len() != 4 {
+            return Err(CbmError::DeviceError {
+                device,
+                message: format!("Invalid status format: {}", clean_status),
+            });
+        }
+
+        let number = parts[0]
+            .trim()
+            .parse::<u8>()
+            .map_err(|_| CbmError::DeviceError {
+                device,
+                message: format!(
+                    "Invalid error number: {} within status: {}",
+                    parts[0], clean_status
+                ),
+            })?;
+        let error_number = number.into();
+        if error_number == CbmErrorNumber::Unknown {
+            warn!("Unknown Error Number (EN) returned by drive: {}", number);
+        }
+
+        let message = parts[1].trim().to_string();
+
+        let track = parts[2]
+            .trim()
+            .parse::<u8>()
+            .map_err(|_| CbmError::DeviceError {
+                device,
+                message: format!(
+                    "Invalid track: {} within status: {}",
+                    parts[2], clean_status
+                ),
+            })?;
+
+        let sector = parts[3]
+            .trim()
+            .trim_end_matches('\n')
+            .trim()
+            .parse::<u8>()
+            .map_err(|_| CbmError::DeviceError {
+                device,
+                message: format!(
+                    "Invalid sector: {} within status: {}",
+                    parts[3], clean_status
+                ),
+            })?;
+
+        Ok(Self {
+            number,
+            error_number,
+            message,
+            track,
+            sector,
+            device,
+        })
+    }
+
+    pub fn is_ok(&self) -> CbmErrorNumberOk {
+        if self.number < 20 {
+            CbmErrorNumberOk::Ok
+        } else if self.number == 73 {
+            CbmErrorNumberOk::Number73
+        } else {
+            CbmErrorNumberOk::Err
+        }
+    }
+
+    pub fn track(&self) -> Option<u8> {
+        if matches!(self.number, 20..=29) {
+            Some(self.track)
+        } else {
+            None
+        }
+    }
+
+    pub fn sector(&self) -> Option<u8> {
+        if matches!(self.number, 20..=29) {
+            Some(self.sector)
+        } else {
+            None
+        }
+    }
+
+    pub fn files_scratched(&self) -> Option<u8> {
+        if self.error_number == CbmErrorNumber::FilesScratched {
+            Some(self.track)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_short_str(&self) -> String {
+        format!("{:02},{}", self.number, self.message)
+    }
+
+    pub fn as_str(&self) -> String {
+        format!(
+            "{:02},{},{:02},{:02}",
+            self.number, self.message, self.track, self.sector
+        )
+    }
+}
+
+impl TryFrom<(&str, u8)> for CbmStatus {
+    type Error = CbmError;
+
+    fn try_from((s, device): (&str, u8)) -> Result<Self, Self::Error> {
+        Self::new(s, device)
+    }
+}
+
+impl fmt::Display for CbmStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{:02},{},{:02},{:02}",
+            self.number, self.message, self.track, self.sector
+        )
+    }
+}
+
+impl Into<Result<(), CbmError>> for CbmStatus {
+    fn into(self) -> Result<(), CbmError> {
+        match self.is_ok() {
+            CbmErrorNumberOk::Ok => Ok(()),
+            CbmErrorNumberOk::Number73 => Err(self.into()),
+            CbmErrorNumberOk::Err => Err(self.into()),
+        }
     }
 }
 
@@ -143,7 +393,6 @@ pub struct CbmDeviceInfo {
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(into = "i32", from = "i32")]
-
 pub enum CbmDeviceType {
     Unknown = -1,
     Cbm1541 = 0,
@@ -254,240 +503,7 @@ impl CbmDeviceType {
     }
 }
 
-/// Holds information about a CBM disk drive status message
-///
-/// This is provided by the drive in the format
-///  EN,EM$,ET,ES
-///
-/// From the manual (1571):
-/// "
-/// EN  (Error Number)
-/// EM$ (Error Message - a string)
-/// ET  (Error Track)
-/// ES  (Error Sector)
-/// Two error numbers are harmless - 0 means everything is OK, and 1 tells
-/// how many files were erased by a SCRATCH command
-/// Note if any other message numbers less than 20 ever appear, they may be
-/// ignored.  All true errors have numbers of 20 or more.
-/// "
-///
-/// Note that 73 is not an error if appears jsut after turning on (or a bus
-/// reset), but at other times is an error indicating DOS mismatch of the
-/// disk inserted.
-///
-/// The manual isn't clear, but it may be that 73 after boot and 73 dos
-/// mismatch provide different error strings, so we can differentiate that
-/// way.  However, we're not going to bother to do so - and will consider 73
-/// an error - if its own sort of error.
-///
-/// Rationale is thatwhen the daemon is created it resets the IEC bus
-/// (causing all attached drives to reboot), but it doesn't read the status
-/// until a mount is attempted.  Then the first thing that is done after
-/// attempting to identify the drive is an initialize (I0).  This is done
-/// before reading the status.  Hence we shouldn't get 73 unless the drive is
-/// unexpected rebooted (or reboots itself).
 #[derive(Debug, Clone, PartialEq)]
-pub struct CbmStatus {
-    pub number: u8,
-    pub error_number: CbmErrorNumber,
-    pub message: String,
-    pub track: u8,
-    pub sector: u8,
-}
-
-impl CbmStatus {
-    /// Create a new CbmStatus from a CBM DOS status string
-    /// Handles both raw device status strings (with #015#000) and clean status strings
-    /// Expected format: "00,OK,00,00" (spaces after commas are optional)
-    pub fn new(status: &str) -> Result<Self, CbmError> {
-        trace!("Received device status: {}", status);
-        trace!("Status bytes: {:?}", status.as_bytes());
-
-        // Status strings end \r\0 - terminate the string here
-        let clean_status = if let Some(pos) = status.find("\r\0") {
-            &status[..pos]
-        } else {
-            status
-        };
-        // Also get rid of up to first 3 bytes if null - see next comment
-        // to understand why
-        let null_count = clean_status
-            .chars()
-            .take(3) // Only look at first 3 chars
-            .take_while(|&c| c == '\0')
-            .count();
-        let clean_status = &clean_status[null_count..];
-
-        debug!("Received cleaned device status: {}", clean_status);
-
-        // This is weird.  It looks like sometimes the first 1 or 2 bytes
-        // of the status from opencbm are set to \0 (null).  Only seen it
-        // when error is set to 99, DRIVER ERROR,00,00.  So we will
-        // copy with up to the first 3 bytes being null and try and match
-        // anyway.
-        // Note that this isn't going to work if the error is something
-        // else, but that will produce an error propogated upwards so will
-        // get logged.
-        let opencbm_error = match clean_status {
-            s if s.starts_with("9, DRIVER ERROR,00,00") => true,
-            s if s.starts_with(", DRIVER ERROR,00,00") => true,
-            s if s.starts_with(" DRIVER ERROR,00,00") => true,
-            _ => false,
-        };
-        if opencbm_error {
-            info!(
-                "Recovered from error receiving status string from opencbm: {}",
-                clean_status
-            );
-            return Ok(Self {
-                number: 99,
-                error_number: CbmErrorNumber::OpenCbm,
-                message: "DRIVER ERROR".to_string(),
-                track: 0,
-                sector: 0,
-            });
-        }
-
-        // Split on comma and collect
-        let parts: Vec<&str> = clean_status.split(',').collect();
-        if parts.len() != 4 {
-            return Err(CbmError::DeviceError(format!(
-                "Invalid status format: {}",
-                clean_status
-            )));
-        }
-
-        // Parse the numeric components, being more aggressive with trimming
-        let number = parts[0].trim().parse::<u8>().map_err(|_| {
-            CbmError::DeviceError(format!(
-                "Invalid error number: {} within status: {}",
-                parts[0], clean_status
-            ))
-        })?;
-        let error_number = number.into();
-        if error_number == CbmErrorNumber::Unknown {
-            warn!("Unknown Error Number (EN) returned by drive: {}", number);
-        }
-
-        // Message part just needs trimming
-        let message = parts[1].trim().to_string();
-
-        let track = parts[2].trim().parse::<u8>().map_err(|_| {
-            CbmError::DeviceError(format!(
-                "Invalid track: {} within status: {}",
-                parts[2], clean_status
-            ))
-        })?;
-
-        // Be more aggressive with cleaning the last field
-        let sector = parts[3]
-            .trim()
-            .trim_end_matches('\n') // Remove any newlines
-            .trim() // Trim again in case there was other whitespace
-            .parse::<u8>()
-            .map_err(|_| {
-                CbmError::DeviceError(format!(
-                    "Invalid sector: {} within status: {}",
-                    parts[3], clean_status
-                ))
-            })?;
-
-        Ok(Self {
-            number,
-            error_number,
-            message,
-            track,
-            sector,
-        })
-    }
-
-    /// Returns Ok if under 20 (although only 0 and 1 expected)
-    /// Returns Number73 is 73 (it's complicated, see CbmStatus)
-    /// Returns Err otherwise
-    pub fn is_ok(&self) -> CbmErrorNumberOk {
-        if self.number < 20 {
-            CbmErrorNumberOk::Ok
-        } else if self.number == 73 {
-            CbmErrorNumberOk::Number73
-        } else {
-            CbmErrorNumberOk::Err
-        }
-    }
-
-    /// Get the track number for errors where track represents a track
-    pub fn track(&self) -> Option<u8> {
-        // Only certain error codes use track as track number
-        if matches!(self.number, 20..=29) {
-            Some(self.track)
-        } else {
-            None
-        }
-    }
-
-    /// Get the sector number for errors where sector represents a sector
-    pub fn sector(&self) -> Option<u8> {
-        // Only certain error codes use sector as sector number
-        if matches!(self.number, 20..=29) {
-            Some(self.sector)
-        } else {
-            None
-        }
-    }
-
-    /// For FILES SCRATCHED status, returns number of files scratched
-    pub fn files_scratched(&self) -> Option<u8> {
-        if self.error_number == CbmErrorNumber::FilesScratched {
-            Some(self.track)
-        } else {
-            None
-        }
-    }
-
-    /// Returns a short representation like "00,OK" or "21,READ ERROR"
-    pub fn as_short_str(&self) -> String {
-        format!("{:02},{}", self.number, self.message)
-    }
-
-    /// Returns the full status string in CBM format
-    pub fn as_str(&self) -> String {
-        format!(
-            "{:02},{},{:02},{:02}",
-            self.number, self.message, self.track, self.sector
-        )
-    }
-}
-
-impl TryFrom<&str> for CbmStatus {
-    type Error = CbmError;
-
-    fn try_from(s: &str) -> Result<Self, Self::Error> {
-        Self::new(s)
-    }
-}
-
-impl fmt::Display for CbmStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{:02},{},{:02},{:02}",
-            self.number, self.message, self.track, self.sector
-        )
-    }
-}
-
-/// going from status directly to this return type is common so make it easy
-impl Into<Result<(), CbmError>> for CbmStatus {
-    fn into(self) -> Result<(), CbmError> {
-        match self.is_ok() {
-            CbmErrorNumberOk::Ok => Ok(()),
-            CbmErrorNumberOk::Number73 => Err(self.into()),
-            CbmErrorNumberOk::Err => Err(self.into()),
-        }
-    }
-}
-
-// CBM drive error numbers
-#[derive(Debug, PartialEq, Clone)]
 pub enum CbmErrorNumber {
     Ok = 0,
     FilesScratched = 1,
@@ -620,9 +636,6 @@ impl fmt::Display for CbmErrorNumber {
     }
 }
 
-/// Used as a return code for CbmStatus::is_ok()
-/// We can't just return a binary result as error number 73 is complicated
-/// (see CbmStatus)
 #[derive(Debug, PartialEq, Clone)]
 pub enum CbmErrorNumberOk {
     Ok,
@@ -630,13 +643,12 @@ pub enum CbmErrorNumberOk {
     Number73,
 }
 
-// File types supported by CBM drives
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CbmFileType {
-    PRG, // Program file
-    SEQ, // Sequential file
-    USR, // User file
-    REL, // Relative file
+    PRG,
+    SEQ,
+    USR,
+    REL,
 }
 
 impl CbmFileType {
@@ -650,7 +662,6 @@ impl CbmFileType {
     }
 }
 
-// File open modes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CbmFileMode {
     Read,
@@ -668,25 +679,19 @@ impl CbmFileMode {
     }
 }
 
-/// Types of operations that can be performed on a CBM disk drive
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CbmOperationType {
-    /// Reading file contents or attributes
     Read,
-    /// Writing file contents or attributes
     Write,
-    /// Reading or updating directory contents
     Directory,
-    /// Control operations like reset
     Control,
 }
 
-/// Represents an active operation on a mountpoint
 #[derive(Debug)]
 struct _CbmOperation {
     op_type: CbmOperationType,
     count: usize,
-    has_write: bool, // True if any current operation is a write
+    has_write: bool,
 }
 
 #[cfg(test)]
@@ -695,18 +700,19 @@ mod tests {
 
     #[test]
     fn test_new_with_bad_status() {
-        let result = CbmStatus::new("bibble bobble flibble flobble");
+        let result = CbmStatus::new("bibble bobble flibble flobble", 8);
         assert_eq!(
             result,
-            Err(CbmError::DeviceError(
-                "Invalid status format: bibble bobble flibble flobble".to_string()
-            ))
+            Err(CbmError::DeviceError {
+                device: 8,
+                message: "Invalid status format: bibble bobble flibble flobble".to_string()
+            })
         );
     }
 
     #[test]
     fn test_status_parsing() {
-        let status = CbmStatus::try_from("21,READ ERROR,18,00").unwrap();
+        let status = CbmStatus::try_from(("21,READ ERROR,18,00", 8)).unwrap();
         assert_eq!(status.number, 21);
         assert_eq!(
             status.error_number,
@@ -715,62 +721,114 @@ mod tests {
         assert_eq!(status.message, "READ ERROR");
         assert_eq!(status.track, 18);
         assert_eq!(status.sector, 0);
+        assert_eq!(status.device, 8);
         assert_eq!(status.is_ok(), CbmErrorNumberOk::Err);
     }
 
     #[test]
     fn test_ok_status() {
-        let status = CbmStatus::try_from("00,OK,00,00").unwrap();
+        let status = CbmStatus::try_from(("00,OK,00,00", 8)).unwrap();
         assert_eq!(status.is_ok(), CbmErrorNumberOk::Ok);
+        assert_eq!(status.device, 8);
         assert_eq!(status.to_string(), "00,OK,00,00");
     }
 
     #[test]
     fn test_73_status() {
-        let status = CbmStatus::try_from("73,DOS MISMATCH,00,00").unwrap();
+        let status = CbmStatus::try_from(("73,DOS MISMATCH,00,00", 8)).unwrap();
         assert_eq!(status.error_number, CbmErrorNumber::DosMismatch);
         assert_eq!(status.is_ok(), CbmErrorNumberOk::Number73);
         assert_eq!(status.to_string(), "73,DOS MISMATCH,00,00");
         assert_eq!(status.message, "DOS MISMATCH");
+        assert_eq!(status.device, 8);
     }
 
     #[test]
     fn test_files_scratched() {
-        let status = CbmStatus::try_from("01,FILES SCRATCHED,03,00").unwrap();
+        let status = CbmStatus::try_from(("01,FILES SCRATCHED,03,00", 8)).unwrap();
         assert_eq!(status.files_scratched(), Some(3));
         assert_eq!(status.message, "FILES SCRATCHED");
         assert_eq!(status.is_ok(), CbmErrorNumberOk::Ok);
         assert_eq!(status.track, 3);
         assert_eq!(status.sector, 0);
+        assert_eq!(status.device, 8);
     }
 
     #[test]
     fn test_read_error_display() {
-        let status = CbmStatus::try_from("21,READ ERROR,18,04").unwrap();
+        let status = CbmStatus::try_from(("21,READ ERROR,18,04", 8)).unwrap();
         assert_eq!(status.files_scratched(), None);
         assert_eq!(status.to_string(), "21,READ ERROR,18,04");
         assert_eq!(status.is_ok(), CbmErrorNumberOk::Err);
         assert_eq!(status.track, 18);
         assert_eq!(status.sector, 4);
+        assert_eq!(status.device, 8);
     }
 
     #[test]
     fn test_null_bytes() {
         // Will succeed
-        let status = CbmStatus::try_from("\09, DRIVER ERROR,00,00").unwrap();
+        let status = CbmStatus::try_from(("\09, DRIVER ERROR,00,00", 8)).unwrap();
         assert_eq!(status.to_string(), "99,DRIVER ERROR,00,00");
-        let status = CbmStatus::try_from("\0\0, DRIVER ERROR,00,00").unwrap();
+        assert_eq!(status.device, 8);
+
+        let status = CbmStatus::try_from(("\0\0, DRIVER ERROR,00,00", 8)).unwrap();
         assert_eq!(status.to_string(), "99,DRIVER ERROR,00,00");
-        let status = CbmStatus::try_from("\0\0\0 DRIVER ERROR,00,00").unwrap();
+        assert_eq!(status.device, 8);
+
+        let status = CbmStatus::try_from(("\0\0\0 DRIVER ERROR,00,00", 8)).unwrap();
         assert_eq!(status.to_string(), "99,DRIVER ERROR,00,00");
+        assert_eq!(status.device, 8);
 
         // Will fail
-        let result = CbmStatus::try_from("\0\0\0\0DRIVER ERROR,00,00");
+        let result = CbmStatus::try_from(("\0\0\0\0DRIVER ERROR,00,00", 8));
         assert_eq!(
             result,
-            Err(CbmError::DeviceError(
-                "Invalid status format: \0DRIVER ERROR,00,00".to_string()
-            ))
+            Err(CbmError::DeviceError {
+                device: 8,
+                message: "Invalid status format: \0DRIVER ERROR,00,00".to_string()
+            })
         );
+    }
+
+    #[test]
+    fn test_error_display() {
+        let error = CbmError::DeviceError {
+            device: 8,
+            message: "Test error".to_string(),
+        };
+        assert_eq!(error.to_string(), "Device 8: Device error: Test error");
+
+        let status = CbmStatus {
+            number: 21,
+            error_number: CbmErrorNumber::ReadErrorNoSyncCharacter,
+            message: "READ ERROR".to_string(),
+            track: 18,
+            sector: 0,
+            device: 8,
+        };
+        let error = CbmError::StatusError { device: 8, status };
+        assert_eq!(
+            error.to_string(),
+            "Device 8: Drive returned error status: 21,READ ERROR,18,00"
+        );
+
+        let error = CbmError::OpenCbmError {
+            device: None,
+            error: OpenCbmError::ThreadTimeout,
+        };
+        assert_eq!(error.to_string(), "n/a: OpenCBM error: Thread timeout");
+    }
+
+    #[test]
+    fn test_fuse_errno() {
+        let error = CbmError::DeviceError {
+            device: 8,
+            message: "Test error".to_string(),
+        };
+        assert_eq!(error.to_errno(), EIO);
+
+        let error = CbmError::FuseError(ENOENT);
+        assert_eq!(error.to_errno(), ENOENT);
     }
 }

@@ -22,10 +22,15 @@ impl Cbm {
     /// Create a Cbm object, which will open the OpenCBM driver using the
     /// default device
     pub fn new() -> Result<Self, CbmError> {
-        let cbm = OpenCbm::open().map_err(|e| CbmError::DeviceError(e.to_string()))?;
+        let cbm = OpenCbm::open().map_err(|e| CbmError::DeviceError {
+            device: 0,
+            message: e.to_string(),
+        })?;
         info!("Reseting IEC/IEEE-488 bus");
-        cbm.reset()
-            .map_err(|e| CbmError::DeviceError(e.to_string()))?;
+        cbm.reset().map_err(|e| CbmError::DeviceError {
+            device: 0,
+            message: e.to_string(),
+        })?;
         debug!("Successfully opened and reset Cbm");
         Ok(Self {
             handle: Mutex::new(cbm),
@@ -35,9 +40,10 @@ impl Cbm {
     /// Reset the entire bus
     pub fn reset_bus(&self) -> Result<(), CbmError> {
         let cbm_guard = self.handle.lock();
-        cbm_guard
-            .reset()
-            .map_err(|e| CbmError::DeviceError(e.to_string()))?;
+        cbm_guard.reset().map_err(|e| CbmError::DeviceError {
+            device: 0,
+            message: e.to_string(),
+        })?;
         Ok(())
     }
 
@@ -45,7 +51,10 @@ impl Cbm {
         let cbm_guard = self.handle.lock();
         let device_info = cbm_guard
             .identify(device)
-            .map_err(|e| CbmError::DeviceError(e.to_string()))?;
+            .map_err(|e| CbmError::DeviceError {
+                device,
+                message: e.to_string(),
+            })?;
         Ok(device_info)
     }
 
@@ -55,15 +64,19 @@ impl Cbm {
         // Try and capture 256 bytes.  We won't get that many - cbmctrl only
         // passes a 40 char buf in.  However, I suspect some drives may
         // return multi line statuses.
-        let (buf, result) = cbm_guard
-            .device_status(device, 256)
-            .map_err(|e| CbmError::DeviceError(e.to_string()))?;
+        let (buf, result) =
+            cbm_guard
+                .device_status(device, 256)
+                .map_err(|e| CbmError::DeviceError {
+                    device,
+                    message: e.to_string(),
+                })?;
 
         if result < 0 {
-            return Err(CbmError::DeviceError(format!(
-                "Failed to get device status error {}",
-                result
-            )));
+            return Err(CbmError::DeviceError {
+                device,
+                message: format!("Failed to get device status error {}", result),
+            });
         }
 
         let status = String::from_utf8_lossy(&buf);
@@ -94,7 +107,7 @@ impl Cbm {
             status.replace("#015", "\n")
         };
 
-        CbmStatus::new(processed.trim()).map(|s| Ok(s))?
+        CbmStatus::new(processed.trim(), device).map(|s| Ok(s))?
     }
 
     /// Send a command to the specified device on channel 15
@@ -106,24 +119,32 @@ impl Cbm {
         // Allocate channel 15 for commands
         cbm_guard
             .listen(device, 15)
-            .map_err(|e| CbmError::CommandError(format!("Listen failed: {}", e)))?;
+            .map_err(|e| CbmError::CommandError {
+                device,
+                message: format!("Listen failed: {}", e),
+            })?;
 
         // Convert command to PETSCII and send
         let cmd_bytes = ascii_to_petscii(command);
         let result = cbm_guard
             .raw_write(&cmd_bytes)
-            .map_err(|e| CbmError::CommandError(format!("Write failed: {}", e)))?;
+            .map_err(|e| CbmError::CommandError {
+                device,
+                message: format!("Write failed: {}", e),
+            })?;
 
         if result != cmd_bytes.len() as i32 {
-            return Err(CbmError::CommandError(
-                "Failed to write full command".into(),
-            ));
+            return Err(CbmError::CommandError {
+                device,
+                message: "Failed to write full command".into(),
+            });
         }
 
         // Cleanup
-        cbm_guard
-            .unlisten()
-            .map_err(|e| CbmError::CommandError(format!("Unlisten failed: {}", e)))?;
+        cbm_guard.unlisten().map_err(|e| CbmError::CommandError {
+            device,
+            message: format!("Unlisten failed: {}", e),
+        })?;
 
         Ok(())
     }
@@ -132,9 +153,10 @@ impl Cbm {
     pub fn format_disk(&self, device: u8, name: &str, id: &str) -> Result<(), CbmError> {
         // Validate ID length
         if id.len() != 2 {
-            return Err(CbmError::InvalidOperation(
-                "Disk ID must be 2 characters".into(),
-            ));
+            return Err(CbmError::InvalidOperation {
+                device,
+                message: "Disk ID must be 2 characters".into(),
+            });
         }
 
         // Construct format command (N:name,id)
@@ -166,12 +188,16 @@ impl Cbm {
         // Now read the file data
         cbm_guard
             .talk(device, channel)
-            .map_err(|e| CbmError::FileError(format!("Talk failed: {}", e)))?;
+            .map_err(|e| CbmError::FileError {
+                device,
+                message: format!("Talk failed: {}", e),
+            })?;
 
         loop {
-            let (buf, count) = cbm_guard
-                .raw_read(256)
-                .map_err(|e| CbmError::FileError(format!("Read failed: {}", e)))?;
+            let (buf, count) = cbm_guard.raw_read(256).map_err(|e| CbmError::FileError {
+                device,
+                message: format!("Read failed: {}", e),
+            })?;
 
             if count <= 0 {
                 break;
@@ -181,9 +207,10 @@ impl Cbm {
         }
 
         // Cleanup
-        cbm_guard
-            .untalk()
-            .map_err(|e| CbmError::FileError(format!("Untalk failed: {}", e)))?;
+        cbm_guard.untalk().map_err(|e| CbmError::FileError {
+            device,
+            message: format!("Untalk failed: {}", e),
+        })?;
 
         Ok(data)
     }
@@ -208,23 +235,33 @@ impl Cbm {
         // Now write the file data
         cbm_guard
             .listen(device, channel)
-            .map_err(|e| CbmError::FileError(format!("Listen failed: {}", e)))?;
+            .map_err(|e| CbmError::FileError {
+                device,
+                message: format!("Listen failed: {}", e),
+            })?;
 
         // Write data in chunks
         for chunk in data.chunks(256) {
             let result = cbm_guard
                 .raw_write(chunk)
-                .map_err(|e| CbmError::FileError(format!("Write failed: {}", e)))?;
+                .map_err(|e| CbmError::FileError {
+                    device,
+                    message: format!("Write failed: {}", e),
+                })?;
 
             if result != chunk.len() as i32 {
-                return Err(CbmError::FileError("Failed to write complete chunk".into()));
+                return Err(CbmError::FileError {
+                    device,
+                    message: "Failed to write complete chunk".into(),
+                });
             }
         }
 
         // Cleanup
-        cbm_guard
-            .unlisten()
-            .map_err(|e| CbmError::FileError(format!("Unlisten failed: {}", e)))?;
+        cbm_guard.unlisten().map_err(|e| CbmError::FileError {
+            device,
+            message: format!("Unlisten failed: {}", e),
+        })?;
 
         Ok(())
     }
@@ -452,7 +489,10 @@ impl CbmDriveUnit {
                 let status = guard.get_status(self.device_number)?;
                 if status.is_ok() != CbmErrorNumberOk::Ok {
                     if !ignore_errors.contains(&status.error_number) {
-                        return Err(CbmError::CommandError(format!("{} {}", cmd, status)));
+                        return Err(CbmError::CommandError {
+                            device: self.device_number,
+                            message: format!("{} {}", cmd, status),
+                        });
                     } else {
                         debug!("Ignoring error {}", status.error_number);
                     }
