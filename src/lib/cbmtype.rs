@@ -321,6 +321,18 @@ impl CbmStatus {
         }
     }
 
+    /// Useful for checking drive gave us any valid response
+    /// This means it's working even if the disk isn't inserted, is corrupt, etc
+    pub fn is_valid_cbm(&self) -> bool {
+        if self.error_number != CbmErrorNumber::OpenCbm
+            && self.error_number != CbmErrorNumber::Unknown
+        {
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn track(&self) -> Option<u8> {
         if matches!(self.number, 20..=29) {
             Some(self.track)
@@ -817,7 +829,7 @@ mod tests {
             device: None,
             error: OpenCbmError::ThreadTimeout,
         };
-        assert_eq!(error.to_string(), "n/a: OpenCBM error: Thread timeout");
+        assert_eq!(error.to_string(), "n/a: OpenCBM error: FFI call timed out");
     }
 
     #[test]
