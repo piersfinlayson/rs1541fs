@@ -13,9 +13,9 @@ use std::sync::Arc;
 
 /// Cbm is the object used by applications to access OpenCBM functionality.
 /// It wraps the libopencbm function calls with a rusty level of abstraction.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Cbm {
-    handle: Mutex<OpenCbm>,
+    handle: Arc<Mutex<OpenCbm>>,
 }
 
 impl Cbm {
@@ -33,7 +33,7 @@ impl Cbm {
         })?;
         debug!("Successfully opened and reset Cbm");
         Ok(Self {
-            handle: Mutex::new(cbm),
+            handle: Arc::new(Mutex::new(cbm)),
         })
     }
 
@@ -474,12 +474,18 @@ impl CbmDriveUnit {
         }
     }
 
+    pub fn get_status(&mut self, cbm: &Cbm) -> Result<CbmStatus, CbmError> {
+        self.busy = true;
+        cbm.get_status(self.device_number)
+            .inspect(|_| self.busy = false)
+            .inspect_err(|_| self.busy = false)
+    }
+
     pub fn send_init(
         &mut self,
-        cbm: &Arc<Mutex<Cbm>>,
+        cbm: Cbm,
         ignore_errors: &Vec<CbmErrorNumber>,
     ) -> Result<Vec<CbmStatus>, CbmError> {
-        let guard = cbm.lock();
         self.busy = true;
 
         // First ? catches panic and maps to CbmError
@@ -488,10 +494,9 @@ impl CbmDriveUnit {
         catch_unwind(AssertUnwindSafe(|| {
             self.num_disk_drives_iter().try_for_each(|ii| {
                 let cmd = format!("i{}", ii);
-                guard
-                    .send_command(self.device_number, &cmd)
+                cbm.send_command(self.device_number, &cmd)
                     .inspect_err(|_| self.busy = false)?;
-                let status = guard
+                let status = cbm
                     .get_status(self.device_number)
                     .inspect_err(|_| self.busy = false)?;
                 if status.is_ok() != CbmErrorNumberOk::Ok {
