@@ -338,31 +338,20 @@ impl DriveManager {
         assert!(mountpoint.is_some() || device_number.is_some());
         assert!(device_number.is_none() || mountpoint.is_some());
 
-        // Try the mountpoint first, because this gives us the mount
-        // rightaway
-        let (mut mount, mut device_number): (Option<_>, Option<u8>) =
+        // Try and get the mountpoint first
+        let mount = {
             if let Some(mountpoint) = mountpoint {
-                locking_section!("Lock", "Mountpoints", {
-                    let mps = self.mountpoints.read().await;
-                    match mps.get(mountpoint.as_ref()) {
-                        Some(mount_ref) => {
-                            // Clone or copy the necessary data out of the mount_ref while the lock is held
-                            let mount_data = mount_ref.clone(); // Or whatever data you need
-                            (Some(mount_data), None)
-                        }
-                        None => {
-                            return Err(DriveError::MountNotFound(
-                                mountpoint.as_ref().to_string_lossy().to_string(),
-                            ))
-                        }
-                    }
-                })
+                match self.get_mount(mountpoint.as_ref()).await {
+                    Ok(mount) => Some(mount),
+                    Err(_) => None,
+                }
             } else {
-                (None, None)
-            };
+                None
+            }
+        };
 
         // Now get the device number
-        device_number = if device_number.is_none() {
+        let device_number = if device_number.is_none() {
             match mount.clone() {
                 Some(mount) => {
                     locking_section!("Lock", "Mount", {
@@ -375,45 +364,26 @@ impl DriveManager {
         } else {
             device_number
         };
-        let actual_device_number = device_number.unwrap();
+        let device_number = device_number.unwrap();
 
         // We now have the device number, but we may still not have the Mount,
         // but given the device_number we can find it the old fashioned way
-        if mount.is_none() {
-            locking_section!("Lock", "Mountpoints", {
-                let mps = self.mountpoints.read().await;
-                for (_path, mps_mount) in mps.iter() {
-                    locking_section!("Lock", "Mount", {
-                        let mps_mount_guard = mps_mount.read().await;
-                        if mps_mount_guard.get_device_num() == actual_device_number {
-                            debug!(
-                                "Found matching mount {} at device {}",
-                                mps_mount_guard.get_mountpoint().to_string_lossy(),
-                                actual_device_number
-                            );
-                            mount = Some(mps_mount.clone());
-                            break;
-                        }
-                    })
-                }
-            })
+        let mount = if mount.is_none() {
+            self.get_mount_from_device_num(device_number).await?
+        } else {
+            mount.unwrap()
         };
 
-        if mount.is_none() {
-            return Err(DriveError::DriveNotFound(actual_device_number));
-        }
-        let actual_mount = mount.unwrap();
-
-        // Now we have a actual_device_number and actual_mount, as u8 and Arc<Mutex<Mount>>
+        // Now we have a device_number and mount, as u8 and Arc<Mutex<Mount>>
         // Next step is to remove the drive.  We do this first in case the
         // drive is busy and can't be removed - we don't want to have already
         // removed from mountpaths
-        self.remove_drive(actual_device_number).await?;
+        self.remove_drive(device_number).await?;
 
         // Now remove it
         locking_section!("Lock", "Mountpoints", {
             let mut mps = self.mountpoints.write().await;
-            let mount_guard = actual_mount.read().await;
+            let mount_guard = mount.read().await;
             match mps.remove(mount_guard.get_mountpoint()) {
                 Some(_) => (), // Successfully removed
                 None => unreachable!(),
@@ -425,7 +395,6 @@ impl DriveManager {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub async fn get_mount<P: AsRef<Path>>(
         &self,
         mountpoint: P,
@@ -441,6 +410,33 @@ impl DriveManager {
                     mountpoint.as_ref().to_string_lossy().into(),
                 ))
         })
+    }
+
+    pub async fn get_mount_from_device_num(&self, device_number: u8) -> Result<Arc<RwLock<Mount>>, DriveError> {
+        let mount = locking_section!("Lock", "Mountpoints", {
+            let mps = self.mountpoints.read().await;
+            for (_path, mps_mount) in mps.iter() {
+                let mount_match = locking_section!("Lock", "Mount", {
+                    let mps_mount_guard = mps_mount.read().await;
+                    if mps_mount_guard.get_device_num() == device_number {
+                        debug!(
+                            "Found matching mount {} at device {}",
+                            mps_mount_guard.get_mountpoint().to_string_lossy(),
+                            device_number
+                        );
+                        Some(mps_mount.clone())
+                    } else {
+                        None
+                    }
+                });
+                if let Some(mount) = mount_match {
+                    return Ok(mount);
+                }
+            }
+            Err(DriveError::DriveNotFound(device_number))
+        });
+        
+        mount
     }
 
     pub async fn identify_drive(&self, device_number: u8) -> Result<CbmDeviceInfo, DriveError> {
