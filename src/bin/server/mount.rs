@@ -368,7 +368,7 @@ impl Mount {
     // This code is really unncessary - dropping Mount should cause fuser to
     // exit
     pub fn unmount(&mut self) {
-        debug!("Mount {} instructed to unmount", self);
+        debug!("Mount {} unmounting", self);
         // Setting fuser to None will cause the fuser BackgroundSession to
         // drop, in turn causing fuser to exit for this mount
         self.fuser = None;

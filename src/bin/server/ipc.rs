@@ -381,7 +381,7 @@ impl IpcServer {
                     }
                 }
             }
-            trace!("IPC background response processor exited");
+            info!("IPC background response processor exited");
         });
     
         trace!("Exiting start_background_receiver");
