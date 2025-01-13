@@ -1,24 +1,27 @@
 use rs1541fs::cbm::{Cbm, CbmDriveUnit};
-use rs1541fs::cbmtype::CbmErrorNumber;
+use rs1541fs::cbmtype::{CbmError, CbmErrorNumber};
 use rs1541fs::validate::{validate_device, validate_mountpoint, DeviceValidation, ValidationType};
 
 use crate::args::get_args;
-use crate::error::DaemonError;
+use crate::bg::{Operation, ProcError};
+use crate::drivemgr::{DriveError, DriveManager};
+use crate::locking_section;
 
 use fuser::{
     spawn_mount2, BackgroundSession, FileAttr, Filesystem, MountOption, ReplyAttr, ReplyData,
     ReplyDirectory, ReplyEntry, Request,
 };
-use log::{debug, info, warn};
-use parking_lot::{Mutex, RwLock};
+use log::{debug, info, trace};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime};
+use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::{Mutex, RwLock};
+
+const NUM_MOUNT_RX_CHANNELS: usize = 2;
 
 /// Cache for directory entries
 ///
@@ -30,104 +33,245 @@ pub struct DirectoryCache {
     _last_updated: std::time::SystemTime,
 }
 
-#[derive(Debug, Clone)]
-struct MountWorkThread {
-    handle: Option<Arc<JoinHandle<()>>>,
-    completed: Arc<AtomicBool>,
-    _mount: Arc<Mutex<Mountpoint>>,
+#[derive(Debug)]
+pub enum MountError {
+    CbmError(String),
+    InternalError(String),
+    ValidationError(String),
 }
 
-impl MountWorkThread {
-    pub fn new<F>(mount: &Mountpoint, worker: F) -> Arc<Mutex<Self>>
-    where
-        F: FnOnce(Arc<Mutex<MountWorkThread>>) + Send + 'static,
-    {
-        let completed = Arc::new(AtomicBool::new(false));
-        let mount = Arc::new(Mutex::new(mount.clone()));
-        
-        // Create with placeholder handle
-        let wt = Self {
-            handle: None,
-            completed,
-            _mount: mount,
-        };
-        
-        let shared_wt = Arc::new(Mutex::new(wt));
-        let worker_wt = shared_wt.clone();
-        
-        shared_wt.lock().handle = Some(Arc::new(thread::spawn(move || worker(worker_wt))));
+impl From<CbmError> for MountError {
+    fn from(error: CbmError) -> Self {
+        match error {
+            CbmError::DeviceError { device, message } => {
+                MountError::CbmError(format!("Device {}: {}", device, message))
+            }
 
-        shared_wt
+            CbmError::ChannelError { device, message } => {
+                MountError::CbmError(format!("Channel error on device {}: {}", device, message))
+            }
+
+            CbmError::FileError { device, message } => {
+                MountError::CbmError(format!("File error on device {}: {}", device, message))
+            }
+
+            CbmError::CommandError { device, message } => {
+                MountError::CbmError(format!("Command failed on device {}: {}", device, message))
+            }
+
+            CbmError::StatusError { device, status } => {
+                MountError::CbmError(format!("Status error on device {}: {:?}", device, status))
+            }
+
+            CbmError::TimeoutError { device } => {
+                MountError::CbmError(format!("Timeout on device {}", device))
+            }
+
+            CbmError::InvalidOperation { device, message } => MountError::CbmError(format!(
+                "Invalid operation on device {}: {}",
+                device, message
+            )),
+
+            CbmError::OpenCbmError { device, error } => {
+                let msg = match device {
+                    Some(dev) => format!("OpenCBM error on device {}: {:?}", dev, error),
+                    None => format!("OpenCBM error: {:?}", error),
+                };
+                MountError::CbmError(msg)
+            }
+
+            CbmError::FuseError(errno) => MountError::CbmError(format!("FUSE error: {}", errno)),
+
+            CbmError::ValidationError(message) => {
+                MountError::CbmError(format!("Validation error: {}", message))
+            }
+        }
     }
 }
+
+impl From<DriveError> for MountError {
+    fn from(error: DriveError) -> Self {
+        match error {
+            DriveError::DriveExists(device) => {
+                MountError::CbmError(format!("Drive {} already exists", device))
+            }
+
+            DriveError::MountExists(mountpoint) => {
+                MountError::CbmError(format!("Mountpoint {} already exists", mountpoint))
+            }
+
+            DriveError::DriveNotFound(device) => {
+                MountError::CbmError(format!("Drive {} not found", device))
+            }
+
+            DriveError::MountNotFound(path) => {
+                MountError::CbmError(format!("Mountpoint {} not found", path))
+            }
+
+            DriveError::BusInUse(device) => {
+                MountError::CbmError(format!("Bus is in use by drive {}", device))
+            }
+
+            DriveError::InvalidDeviceNumber(device) => {
+                MountError::CbmError(format!("Invalid device number {} (must be 0-31)", device))
+            }
+
+            DriveError::InitializationError(device, msg) => {
+                MountError::CbmError(format!("Drive {} initialization failed: {}", device, msg))
+            }
+
+            DriveError::BusError(msg) => {
+                MountError::CbmError(format!("Bus operation failed: {}", msg))
+            }
+
+            DriveError::Timeout(device) => {
+                MountError::CbmError(format!("Operation timeout on drive {}", device))
+            }
+
+            DriveError::DriveNotResponding(device, msg) => {
+                MountError::CbmError(format!("Drive {} is not responding: {}", device, msg))
+            }
+
+            DriveError::DriveError(device, msg) => {
+                MountError::CbmError(format!("Drive {} reports error: {}", device, msg))
+            }
+
+            DriveError::DriveBusy(device) => {
+                MountError::CbmError(format!("Drive {} is busy", device))
+            }
+
+            DriveError::InvalidState(device, msg) => {
+                MountError::CbmError(format!("Invalid drive state: {} device {}", msg, device))
+            }
+
+            DriveError::BusResetInProgress => {
+                MountError::CbmError("Bus reset in progress".to_string())
+            }
+
+            DriveError::ConcurrencyError(msg) => {
+                MountError::InternalError(format!("Concurrent operation conflict: {}", msg))
+            }
+
+            DriveError::OpenCbmError(device, msg) => MountError::CbmError(format!(
+                "OpenCBM error: device number {} error {}",
+                device, msg
+            )),
+        }
+    }
+}
+
+impl From<std::io::Error> for MountError {
+    fn from(error: std::io::Error) -> Self {
+        MountError::InternalError(error.to_string())
+    }
+}
+
+impl fmt::Display for MountError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MountError::CbmError(msg) => write!(f, "CBM error: {}", msg),
+            MountError::InternalError(msg) => write!(f, "Internal error: {}", msg),
+            MountError::ValidationError(msg) => write!(f, "Validation error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for MountError {}
 
 /// Represents a mounted filesystem
 ///
 /// Manages the connection between a physical drive unit and its
 /// representation in the Linux filesystem.
 #[derive(Debug, Clone)]
-pub struct Mountpoint {
+#[allow(dead_code)]
+pub struct Mount {
+    device_num: u8,
     mountpoint: PathBuf,
     cbm: Arc<Mutex<Cbm>>,
+    drive_mgr: Arc<Mutex<DriveManager>>,
     drive_unit: Arc<RwLock<CbmDriveUnit>>,
+    bg_proc_tx: Arc<Sender<Operation>>,
+    bg_rsp_tx: Arc<Sender<Result<(), ProcError>>>,
+    bg_rsp_rx: Arc<Mutex<Receiver<Result<(), ProcError>>>>,
     directory_cache: Arc<RwLock<DirectoryCache>>,
     fuser: Option<Arc<Mutex<BackgroundSession>>>,
-    dir_wt: Option<Arc<Mutex<MountWorkThread>>>,
 }
 
-impl fmt::Display for Mountpoint {
+impl fmt::Display for Mount {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "Mountpoint {{ path: {}, drive: {} }}",
+            "Mount {{ device_num: {}, path: {} }}",
+            self.device_num,
             self.mountpoint.display(),
-            self.drive_unit.read()
         )
     }
 }
 
-impl Mountpoint {
+impl Mount {
+    /// While this function does cause the DriveUnit to be created within
+    /// DriveManager, it will not insert Mount into mountpaths.  The caller
+    /// must do that.  DriveManager will, as part of creating the DriveUnit
+    /// check there are no existing DriveUnits or mountpoints with the values
+    /// passed in here.
+    /// This new() is not async as no locking is required.
     pub fn new<P: AsRef<Path>>(
+        device_num: u8,
         mountpoint: P,
         cbm: Arc<Mutex<Cbm>>,
-        drive_unit: CbmDriveUnit,
-    ) -> Self {
-        Self {
+        drive_mgr: Arc<Mutex<DriveManager>>,
+        drive_unit: Arc<RwLock<CbmDriveUnit>>,
+        bg_proc_tx: Arc<Sender<Operation>>,
+    ) -> Result<Self, MountError> {
+        // Create a mpsc::Channel for receiving reponses from Background
+        // Process
+        let (tx, rx) = mpsc::channel(NUM_MOUNT_RX_CHANNELS);
+
+        // We have to Arc<Mutex<rx>>, because we want to clone Mount into the
+        // fuser thread
+        let shared_rx = Arc::new(Mutex::new(rx));
+
+        // Create directory cache
+        let dir_cache = Arc::new(RwLock::new(DirectoryCache {
+            entries: HashMap::new(),
+            _last_updated: SystemTime::now(),
+        }));
+
+        // Create Mount
+        Ok(Self {
+            device_num,
             mountpoint: mountpoint.as_ref().to_path_buf(),
             cbm,
-            drive_unit: Arc::new(RwLock::new(drive_unit)),
-            directory_cache: Arc::new(RwLock::new(DirectoryCache {
-                entries: HashMap::new(),
-                _last_updated: SystemTime::now(),
-            })),
+            drive_mgr,
+            drive_unit,
+            bg_proc_tx,
+            bg_rsp_tx: Arc::new(tx),
+            bg_rsp_rx: shared_rx,
+            directory_cache: dir_cache,
             fuser: None,
-            dir_wt: None,
-        }
+        })
     }
 
-    fn check_if_workthread_completed(workthread: &mut Option<Arc<Mutex<MountWorkThread>>>) -> bool {
-        if let Some(wt) = &workthread {
-            if wt.lock().completed.load(Ordering::SeqCst) {
-                *workthread = None;
-                true
-            } else {
-                false
-            }
-        } else {
-            true
-        }
-    }
-
-    pub fn _refresh_directory(&mut self) -> Result<(), DaemonError> {
+    /*
+    pub fn _refresh_directory(&mut self) -> Result<(), MountError> {
         let mut guard = self.directory_cache.write();
         guard.entries.clear();
         guard._last_updated = std::time::SystemTime::now();
         Ok(())
     }
+    */
 
-    fn create_fuser(&mut self) -> Result<(), DaemonError> {
+    pub fn get_device_num(&self) -> u8 {
+        self.device_num
+    }
+
+    pub fn get_mountpoint(&self) -> &PathBuf {
+        &self.mountpoint
+    }
+
+    async fn create_fuser(&mut self) -> Result<(), MountError> {
         if self.fuser.is_some() {
-            return Err(DaemonError::ValidationError(format!(
+            return Err(MountError::ValidationError(format!(
                 "Cannot mount as we already have a fuser thread"
             )));
         }
@@ -140,7 +284,7 @@ impl Mountpoint {
         options.push(MountOption::Sync);
         options.push(MountOption::DirSync);
         options.push(MountOption::NoDev);
-        options.push(MountOption::FSName(self.get_fs_name()));
+        options.push(MountOption::FSName(self.get_fs_name().await));
         options.push(MountOption::Subtype("1541fs".to_string()));
 
         let args = get_args();
@@ -158,19 +302,19 @@ impl Mountpoint {
         Ok(())
     }
 
-    pub fn mount(&mut self) -> Result<(), DaemonError> {
-        debug!("Mountpoint {} instructed to mount", self);
+    // This mount function is async because locking is required - we have to
+    // get the drive_unit (as read) in order to retrieve the device type, in
+    // order to build the FS name.  We could have done this in the new() -
+    // there's no trade off, and it seems a bit more intuitive that the Mount
+    // may block.  OTOH it shouldn't because the drive_unit really shouldn't
+    // be in use at this point.
+    pub async fn mount(&mut self) -> Result<Arc<Mutex<Mount>>, MountError> {
+        debug!("Mount {} instructed to mount", self);
 
+        // Double check we're not already running in fuser
         if self.fuser.is_some() {
-            return Err(DaemonError::InternalError(format!(
-                "Trying to mount an already mounted Mountpoint object {}",
-                self.mountpoint.display()
-            )));
-        }
-        
-        if !Self::check_if_workthread_completed(&mut self.dir_wt) {
-            return Err(DaemonError::InternalError(format!(
-                "Trying to mount an already mounted Mountpoint object (work) {}",
+            return Err(MountError::InternalError(format!(
+                "Trying to mount an already mounted Mount object {}",
                 self.mountpoint.display()
             )));
         }
@@ -186,45 +330,69 @@ impl Mountpoint {
         // a mounted filesystem.
         // If we don't succeed in initing (with perhaps an error 21) we will
         // the mount (and not bother mounting fuser)
-        let mut guard = self.drive_unit.write();
+
+        // Construct errors to ignore in drive_init
         let ignore = vec![CbmErrorNumber::ReadErrorNoSyncCharacter];
-        guard.send_init(&self.cbm, &ignore).inspect(|status_vec| {
-            debug!("Status from drive (error 21 ignored): {:?}", status_vec)
-        })?;
-        drop(guard);
 
-        // Create the fuser thread
-        self.create_fuser()?;
+        // Init the drive
+        locking_section!("Lock", "Drive Manager", {
+            let drive_mgr = self.drive_mgr.clone();
+            let drive_mgr = drive_mgr.lock().await;
+            drive_mgr
+                .init_drive(self.device_num, &ignore)
+                .await
+                .inspect(|status_vec| {
+                    debug!("Status from drive (error 21 ignored): {:?}", status_vec)
+                })?;
+        });
 
+        // Create a shared mutex for self, as this is what we'll need to
+        // return
+        let mount = Arc::new(Mutex::new(self.clone()));
+
+        // Now we've verified the drive exists, and we can talk it, create
+        // the fuser thread.  We need to create the fuser thread from that
+        // version of mount, so it doesn't consume it
+        let mount_clone = mount.clone();
+        locking_section!("Lock", "Mount", {
+            let mut mount_clone = mount_clone.lock().await;
+            mount_clone.create_fuser().await?;
+        });
+
+        // TO DO
         // kick off a directory read, in a separate thread
-        self.dir_wt = Some(MountWorkThread::new(self, dir_read));
 
-        Ok(())
+        Ok(mount)
     }
 
-    pub fn unmount(&mut self) -> Result<(), DaemonError> {
-        debug!("Mountpoint {} instructed to unmount", self);
+    /* This code is unncessary - dropping Mount should cause fuser to exit
+    pub fn unmount(&mut self) -> Result<(), MountError> {
+        debug!("Mount {} instructed to unmount", self);
         // Setting fuser to None will cause the fuser BackgroundSession to
         // drop, in turn causing fuser to exit for this mount
         self.fuser = None;
         Ok(())
     }
+    */
 
     // We use the format CbmDeviceType_dev<num>
-    fn get_fs_name(&self) -> String {
-        let guard = self.drive_unit.read();
-        format!(
-            "{}_{}",
-            guard.device_type.to_fs_name(),
-            guard.device_number.to_string()
-        )
+    async fn get_fs_name(&self) -> String {
+        locking_section!("Read", "Drive", {
+            let guard = self.drive_unit.read().await;
+            format!(
+                "{}_{}",
+                guard.device_type.to_fs_name().to_lowercase(),
+                guard.device_number.to_string()
+            )
+        })
     }
 }
 
-impl Filesystem for Mountpoint {
+//
+impl Filesystem for Mount {
     fn lookup(&mut self, _req: &Request, _parent: u64, name: &OsStr, reply: ReplyEntry) {
         // Implementation for looking up files/directories
-        let guard = self.directory_cache.read();
+        let guard = self.directory_cache.blocking_read();
 
         if let Some(attr) = guard.entries.get(name.to_str().unwrap_or("")) {
             reply.entry(&Duration::new(1, 0), attr, 0);
@@ -271,19 +439,12 @@ impl Filesystem for Mountpoint {
     }
 }
 
-fn dir_read(wt: Arc<Mutex<MountWorkThread>>) {
-        debug!("trigger_dir_read called");
-
-        debug!("trigger_dir_read completed");
-        wt.lock().completed.store(true, Ordering::SeqCst);
-    }
-
 pub fn validate_mount_request<P: AsRef<Path>>(
     mountpoint: P,
     device: u8,
     dummy_formats: bool,
     bus_reset: bool,
-) -> Result<PathBuf, DaemonError> {
+) -> Result<PathBuf, MountError> {
     // If validation OK, assert that we got given the same device number - it
     // shouldn't change if it was validate, as we are doing Required
     // validation which doesn't return a default value, or otherwise change it
@@ -314,17 +475,17 @@ pub fn validate_mount_request<P: AsRef<Path>>(
 pub fn validate_unmount_request<P: AsRef<Path>>(
     mountpoint: &Option<P>,
     device: Option<u8>,
-) -> Result<(), DaemonError> {
+) -> Result<(), MountError> {
     // Validate that at least one of mountpoint or device is Some
     if mountpoint.is_none() && device.is_none() {
-        return Err(DaemonError::ValidationError(format!(
+        return Err(MountError::ValidationError(format!(
             "Either mountpoint or device must be specified"
         )));
     }
 
     // Validate that only one of mountpoint or device is Some
     if mountpoint.is_some() && device.is_some() {
-        return Err(DaemonError::ValidationError(format!(
+        return Err(MountError::ValidationError(format!(
             "For an unmount only one of mountpoint or device must be specified"
         )));
     }
@@ -342,132 +503,6 @@ pub fn validate_unmount_request<P: AsRef<Path>>(
         let vdevice = validate_device(device, DeviceValidation::Required)?;
         assert_eq!(vdevice, device);
     }
-
-    Ok(())
-}
-
-// Checks whether this mountpoint or this device number is already mounted
-// Returns Ok(()) if this is new, Err<String> if either the mount exists or
-// we hit an error
-// TO DO - reckon this can be simplified
-fn check_new_mount<P: AsRef<Path>>(
-    mps: &RwLock<HashMap<u8, Mountpoint>>,
-    mountpoint: P,
-    device: u8,
-) -> Result<(), DaemonError> {
-    // lock mps for the whole of this function
-    let guard = mps.read();
-
-    // Check if device number is already mounted
-    if guard.get(&device).is_some() {
-        return Err(DaemonError::ValidationError(format!(
-            "Mountpoint for device {} already exists",
-            device
-        )));
-    }
-
-    // Check if mointpoint path is already mounted
-    if let Some(mp) = guard
-        .values()
-        .find(|mp| mp.mountpoint == mountpoint.as_ref().to_path_buf())
-    {
-        return Err(DaemonError::ValidationError(format!(
-            "Device {} is already mounted at mountpoint {}",
-            device,
-            mp.mountpoint.display()
-        )));
-    }
-
-    // No matches - return Ok(())
-    Ok(())
-}
-
-/// Create a new mount object, mount it insert it into the HashMap and
-/// return Ok(()).
-///
-/// Before creating the Mountpoint object, this function checks that it
-/// doesn't already exist.
-///
-/// Both cbm and mps must be Arcs:
-/// * cbm will be stored in Mountpoint
-/// * mps will be mutated - and RwLock requires Arc to provide mutability
-pub fn create_mount<P: AsRef<Path>>(
-    cbm: Arc<Mutex<Cbm>>, // Need to pass in Arc here, as will be stored in Mountpoint
-    mps: &mut Arc<RwLock<HashMap<u8, Mountpoint>>>, // Need to pass in Arc
-    mountpoint: P,
-    device: u8,
-    _dummy_formats: bool,
-    _bus_reset: bool,
-) -> Result<(), DaemonError> {
-    // Check this will be a new mount (i.e. it doesn't alreday exist)
-    check_new_mount(&*mps, &mountpoint, device)?;
-
-    // Try and identify the device using opencbm
-    let guard = cbm.lock();
-    let device_info = guard.identify(device)?;
-    drop(guard); // Unnecessary but ensures guard not kept in scope by later reuse
-
-    // Create Mountpoint object
-    let mut mount = Mountpoint::new(
-        &mountpoint,
-        cbm,
-        CbmDriveUnit::new(device, device_info.device_type),
-    );
-
-    // Mount it
-    mount.mount()?;
-
-    // Insert it into the hashmap
-    let mut guard = mps.write();
-    guard.insert(device, mount);
-    drop(guard);
-
-    Ok(())
-}
-
-pub fn destroy_mount<P: AsRef<Path>>(
-    _cbm: &Mutex<Cbm>,
-    mps: &mut Arc<RwLock<HashMap<u8, Mountpoint>>>,
-    mountpoint: Option<P>,
-    device: Option<u8>,
-) -> Result<(), DaemonError> {
-    assert!(mountpoint.is_some() || device.is_some());
-
-    // Get the mount
-    let mut mount = if let Some(device) = device {
-        // Get it from the mountpoint
-        let guard = mps.read();
-        guard
-            .get(&device)
-            .ok_or_else(|| {
-                DaemonError::ValidationError(format!("No matching mounted device found {}", device))
-            })?
-            .clone()
-    } else {
-        let guard = mps.write();
-        let path: PathBuf = mountpoint.expect("Unreachable code").as_ref().to_path_buf();
-        guard
-            .values()
-            .find(|mp| mp.mountpoint == path)
-            .ok_or_else(|| {
-                DaemonError::ValidationError(format!("No matching mountpoint found {:?}", path))
-            })?
-            .clone()
-    };
-
-    debug!("Found Mountpoint object");
-
-    // Unmount it - the fuser thread gets drop within this function, meaning
-    // the mount is actually removed from the kernel
-    mount.unmount()?;
-
-    // Remove from hashmap
-    let mut guard = mps.write();
-    match guard.remove(&mount.drive_unit.read().device_number) {
-        Some(_) => {}
-        None => warn!("Couldn't remove fuse thread as it couldn't be found"),
-    };
-    drop(guard);
 
     Ok(())
 }

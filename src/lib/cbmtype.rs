@@ -397,9 +397,16 @@ impl Into<Result<(), CbmError>> for CbmStatus {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct CbmDeviceInfo {
     pub device_type: CbmDeviceType,
     pub description: String,
+}
+
+impl fmt::Display for CbmDeviceInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.device_type, self.description)
+    }
 }
 
 #[repr(i32)]
@@ -422,11 +429,32 @@ pub enum CbmDeviceType {
     FdX000 = 12,
 }
 
+impl fmt::Display for CbmDeviceType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CbmDeviceType::Unknown => write!(f, "Unknown"),
+            CbmDeviceType::Cbm1541 => write!(f, "CBM 1541"),
+            CbmDeviceType::Cbm1570 => write!(f, "CBM 1570"),
+            CbmDeviceType::Cbm1571 => write!(f, "CBM 1571"),
+            CbmDeviceType::Cbm1581 => write!(f, "CBM 1581"),
+            CbmDeviceType::Cbm2040 => write!(f, "CBM 2040"),
+            CbmDeviceType::Cbm2031 => write!(f, "CBM 2031"),
+            CbmDeviceType::Cbm3040 => write!(f, "CBM 3040"),
+            CbmDeviceType::Cbm4040 => write!(f, "CBM 4040"),
+            CbmDeviceType::Cbm4031 => write!(f, "CBM 4031"),
+            CbmDeviceType::Cbm8050 => write!(f, "CBM 8050"),
+            CbmDeviceType::Cbm8250 => write!(f, "CBM 8250"),
+            CbmDeviceType::Sfd1001 => write!(f, "SFD 1001"),
+            CbmDeviceType::FdX000 => write!(f, "FD X000"),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct CbmDeviceTypeError(String);
 
-impl std::fmt::Display for CbmDeviceTypeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for CbmDeviceTypeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Invalid device type value: {}", self.0)
     }
 }
@@ -458,12 +486,6 @@ impl From<i32> for CbmDeviceType {
 impl From<CbmDeviceType> for i32 {
     fn from(value: CbmDeviceType) -> Self {
         value as i32
-    }
-}
-
-impl fmt::Display for CbmDeviceType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
     }
 }
 

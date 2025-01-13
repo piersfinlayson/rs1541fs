@@ -1,6 +1,8 @@
 use rs1541fs::cbmtype::CbmError;
 use rs1541fs::ipc::Response;
 
+use crate::mount::MountError;
+
 #[derive(Debug)]
 pub enum DaemonError {
     CbmError(CbmError),
@@ -8,6 +10,7 @@ pub enum DaemonError {
     ValidationError(String),
     MountError(std::io::Error),
     InternalError(String),
+    AgedOut(String),
 }
 
 // Implement automatic conversion from CbmError to DaemonError
@@ -35,6 +38,21 @@ impl std::fmt::Display for DaemonError {
             DaemonError::ValidationError(msg) => write!(f, "Validation error: {}", msg),
             DaemonError::MountError(e) => write!(f, "Mount error: {}", e),
             DaemonError::InternalError(e) => write!(f, "Internal error: {}", e),
+            DaemonError::AgedOut(e) => write!(f, "Aged out request - has been dropped: {}", e),
+        }
+    }
+}
+
+impl From<MountError> for DaemonError {
+    fn from(error: MountError) -> Self {
+        match error {
+            MountError::CbmError(msg) => {
+                // Create a generic CbmError that we can wrap
+                let cbm_error = CbmError::ValidationError(msg);
+                DaemonError::CbmError(cbm_error)
+            }
+            MountError::InternalError(msg) => DaemonError::InternalError(msg),
+            MountError::ValidationError(msg) => DaemonError::ValidationError(msg),
         }
     }
 }
