@@ -374,7 +374,12 @@ impl DriveManager {
             mount.unwrap()
         };
 
-        // Now we have a device_number and mount, as u8 and Arc<Mutex<Mount>>
+        // Now we have a device_number and mount, as u8 and Arc<Mutex<Mount>>.
+        // Unmount the drive
+        locking_section!("Lock", "Mount", {
+            mount.write().await.unmount();
+        });
+
         // Next step is to remove the drive.  We do this first in case the
         // drive is busy and can't be removed - we don't want to have already
         // removed from mountpaths
