@@ -544,31 +544,9 @@ impl Proc {
                 op.op_type
             ))),
         };
-        /*
-        let rsp_type2 = rsp_type.clone();
-        let stream = match rsp_type2 {
-            Ok(rsp_type) => {
-                match rsp_type {
-                    RspType::BusReset() => {
-                        debug!("DEBUG setting stream to None");
-                        None
-                    },
-                    _ => {
-                        debug!("DEBUG setting stream to op.stream");
-                        op.stream
-                    },
-                }
-            },
-            Err(_) => {
-                debug!("DEBUG setting stream to op.stream");
-                op.stream
-            },
-        };
-        */
         rsp_type.map(|rsp_type| Resp {
             rsp_type,
             stream: op.stream,
-            //stream: None,
         })
     }
 

@@ -365,15 +365,14 @@ impl Mount {
         Ok(mount)
     }
 
-    /* This code is unncessary - dropping Mount should cause fuser to exit
-    pub fn unmount(&mut self) -> Result<(), MountError> {
-        debug!("Mount {} instructed to unmount", self);
-        // Setting fuser to None will cause the fuser BackgroundSession to
-        // drop, in turn causing fuser to exit for this mount
-        self.fuser = None;
-        Ok(())
-    }
-    */
+    // This code is unncessary - dropping Mount should cause fuser to exit
+    //pub fn unmount(&mut self) -> Result<(), MountError> {
+    //    debug!("Mount {} instructed to unmount", self);
+    //    // Setting fuser to None will cause the fuser BackgroundSession to
+    //    // drop, in turn causing fuser to exit for this mount
+    //    self.fuser = None;
+    //    Ok(())
+    //}
 
     // We use the format CbmDeviceType_dev<num>
     async fn get_fs_name(&self) -> String {
