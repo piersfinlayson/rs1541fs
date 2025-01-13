@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 
 /// Main 1541fsd data structure, storing:
@@ -42,7 +42,7 @@ pub struct Daemon {
 
     // Mountpoints HashMap.  This is needed by DriveManager to check for
     // the existence of an existing mount at a mountpoint
-    mountpoints: Arc<Mutex<HashMap<PathBuf, Arc<Mutex<Mount>>>>>,
+    mountpoints: Arc<RwLock<HashMap<PathBuf, Arc<RwLock<Mount>>>>>,
 
     // Main tokio runtime
     runtime: Option<Arc<Mutex<Runtime>>>,
@@ -79,7 +79,7 @@ impl Daemon {
         let bg_proc_shutdown = Arc::new(AtomicBool::new(false));
 
         // Create mountpoints HashMap
-        let mountpoints = Arc::new(Mutex::new(HashMap::new()));
+        let mountpoints = Arc::new(RwLock::new(HashMap::new()));
 
         // Create DriveManager
         let drive_mgr = DriveManager::new(cbm.clone(), mountpoints.clone());

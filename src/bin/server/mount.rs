@@ -308,7 +308,7 @@ impl Mount {
     // there's no trade off, and it seems a bit more intuitive that the Mount
     // may block.  OTOH it shouldn't because the drive_unit really shouldn't
     // be in use at this point.
-    pub async fn mount(&mut self) -> Result<Arc<Mutex<Mount>>, MountError> {
+    pub async fn mount(&mut self) -> Result<Arc<RwLock<Mount>>, MountError> {
         debug!("Mount {} instructed to mount", self);
 
         // Double check we're not already running in fuser
@@ -348,14 +348,14 @@ impl Mount {
 
         // Create a shared mutex for self, as this is what we'll need to
         // return
-        let mount = Arc::new(Mutex::new(self.clone()));
+        let mount = Arc::new(RwLock::new(self.clone()));
 
         // Now we've verified the drive exists, and we can talk it, create
         // the fuser thread.  We need to create the fuser thread from that
         // version of mount, so it doesn't consume it
         let mount_clone = mount.clone();
         locking_section!("Lock", "Mount", {
-            let mut mount_clone = mount_clone.lock().await;
+            let mut mount_clone = mount_clone.write().await;
             mount_clone.create_fuser().await?;
         });
 

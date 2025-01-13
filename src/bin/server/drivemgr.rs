@@ -115,17 +115,30 @@ impl From<CbmError> for DriveError {
     }
 }
 
+/// DriveManager is used by Mounts to access the disk drives.
+/// 
+/// Drives (CbmDriveUnit) are Hashed using device number, as this is
+/// guaranteed to be unique per drive.  They are protected by a RwLock as
+/// there may be reads to identify the drive, or whether its busy.
+/// 
+/// Mouts are Hased using the mountpoint (mountpath) and are locked via a
+/// RwLock.  This is because Mounts may cache some information from the disk
+/// drive, and it may be that this can be returned back to the caller without
+/// hitting the disk and/or updating the cache, i.e. using a read() instead
+/// of a write().
+/// 
+/// Mountpoints are similarly held using a RwLock for the same reason.
 #[derive(Debug)]
 pub struct DriveManager {
     drives: RwLock<HashMap<u8, Arc<RwLock<CbmDriveUnit>>>>,
     cbm: Arc<Mutex<Cbm>>,
-    mountpoints: Arc<Mutex<HashMap<PathBuf, Arc<Mutex<Mount>>>>>,
+    mountpoints: Arc<RwLock<HashMap<PathBuf, Arc<RwLock<Mount>>>>>,
 }
 
 impl DriveManager {
     pub fn new(
         cbm: Arc<Mutex<Cbm>>,
-        mountpoints: Arc<Mutex<HashMap<PathBuf, Arc<Mutex<Mount>>>>>,
+        mountpoints: Arc<RwLock<HashMap<PathBuf, Arc<RwLock<Mount>>>>>,
     ) -> Self {
         debug!("Initializing new DriveManager");
         Self {
@@ -163,7 +176,7 @@ impl DriveManager {
 
         // Check whether mountpoint exists
         locking_section!("Lock", "Mountpoints", {
-            let mps = self.mountpoints.lock().await;
+            let mps = self.mountpoints.read().await;
             if mps.contains_key(mountpoint.as_ref()) {
                 info!(
                     "Mountpoint {} already exists",
@@ -240,7 +253,7 @@ impl DriveManager {
 
         // Now it's mounted, add it to the mountpoints HashMap
         locking_section!("Lock", "Mountpoints", {
-            let mut mps = self.mountpoints.lock().await;
+            let mut mps = self.mountpoints.write().await;
             match mps.insert(mountpoint.as_ref().to_path_buf(), mount) {
                 None => Ok(()), // No previous value, success
                 Some(_) => {
@@ -330,7 +343,7 @@ impl DriveManager {
         let (mut mount, mut device_number): (Option<_>, Option<u8>) =
             if let Some(mountpoint) = mountpoint {
                 locking_section!("Lock", "Mountpoints", {
-                    let mps = self.mountpoints.lock().await;
+                    let mps = self.mountpoints.read().await;
                     match mps.get(mountpoint.as_ref()) {
                         Some(mount_ref) => {
                             // Clone or copy the necessary data out of the mount_ref while the lock is held
@@ -353,7 +366,7 @@ impl DriveManager {
             match mount.clone() {
                 Some(mount) => {
                     locking_section!("Lock", "Mount", {
-                        let mount_guard = mount.lock().await;
+                        let mount_guard = mount.read().await;
                         Some(mount_guard.get_device_num())
                     })
                 }
@@ -368,10 +381,10 @@ impl DriveManager {
         // but given the device_number we can find it the old fashioned way
         if mount.is_none() {
             locking_section!("Lock", "Mountpoints", {
-                let mps = self.mountpoints.lock().await;
+                let mps = self.mountpoints.read().await;
                 for (_path, mps_mount) in mps.iter() {
                     locking_section!("Lock", "Mount", {
-                        let mps_mount_guard = mps_mount.lock().await;
+                        let mps_mount_guard = mps_mount.read().await;
                         if mps_mount_guard.get_device_num() == actual_device_number {
                             debug!(
                                 "Found matching mount {} at device {}",
@@ -399,8 +412,8 @@ impl DriveManager {
 
         // Now remove it
         locking_section!("Lock", "Mountpoints", {
-            let mut mps = self.mountpoints.lock().await;
-            let mount_guard = actual_mount.lock().await;
+            let mut mps = self.mountpoints.write().await;
+            let mount_guard = actual_mount.read().await;
             match mps.remove(mount_guard.get_mountpoint()) {
                 Some(_) => (), // Successfully removed
                 None => unreachable!(),
@@ -416,10 +429,10 @@ impl DriveManager {
     pub async fn get_mount<P: AsRef<Path>>(
         &self,
         mountpoint: P,
-    ) -> Result<Arc<Mutex<Mount>>, DriveError> {
+    ) -> Result<Arc<RwLock<Mount>>, DriveError> {
         trace!("Getting mount {}", mountpoint.as_ref().to_string_lossy());
         locking_section!("Lock", "Mountpoints", {
-            let mountpoints = self.mountpoints.lock().await;
+            let mountpoints = self.mountpoints.read().await;
             // Assuming mountpoints is a HashMap or similar
             mountpoints
                 .get(mountpoint.as_ref())
