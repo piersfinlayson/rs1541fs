@@ -116,17 +116,17 @@ impl From<CbmError> for DriveError {
 }
 
 /// DriveManager is used by Mounts to access the disk drives.
-/// 
+///
 /// Drives (CbmDriveUnit) are Hashed using device number, as this is
 /// guaranteed to be unique per drive.  They are protected by a RwLock as
 /// there may be reads to identify the drive, or whether its busy.
-/// 
+///
 /// Mouts are Hased using the mountpoint (mountpath) and are locked via a
 /// RwLock.  This is because Mounts may cache some information from the disk
 /// drive, and it may be that this can be returned back to the caller without
 /// hitting the disk and/or updating the cache, i.e. using a read() instead
 /// of a write().
-/// 
+///
 /// Mountpoints are similarly held using a RwLock for the same reason.
 #[derive(Debug)]
 pub struct DriveManager {
@@ -412,7 +412,10 @@ impl DriveManager {
         })
     }
 
-    pub async fn get_mount_from_device_num(&self, device_number: u8) -> Result<Arc<RwLock<Mount>>, DriveError> {
+    pub async fn get_mount_from_device_num(
+        &self,
+        device_number: u8,
+    ) -> Result<Arc<RwLock<Mount>>, DriveError> {
         let mount = locking_section!("Lock", "Mountpoints", {
             let mps = self.mountpoints.read().await;
             for (_path, mps_mount) in mps.iter() {
@@ -435,7 +438,7 @@ impl DriveManager {
             }
             Err(DriveError::DriveNotFound(device_number))
         });
-        
+
         mount
     }
 
@@ -547,5 +550,68 @@ impl DriveManager {
         });
         trace!("Connected drives: {:?}", drive_list);
         drive_list
+    }
+
+    pub async fn cleanup_mounts(&self) {
+        trace!("Starting cleanup of all mounts");
+        
+        // Get a list of all mountpoints to clean up
+        let mountpoints: Vec<PathBuf> = locking_section!("Lock", "Mountpoints", {
+            let mps = self.mountpoints.read().await;
+            mps.keys().cloned().collect()
+        });
+
+        // Clean up each mount individually
+        for mountpoint in mountpoints {
+            match self.unmount_drive(None, Some(&mountpoint)).await {
+                Ok(_) => info!("Successfully cleaned up mount at {}", mountpoint.to_string_lossy()),
+                Err(e) => warn!("Failed to clean up mount at {}: {}", mountpoint.to_string_lossy(), e),
+            }
+        }
+
+        // Final verification that mountpoints are empty
+        locking_section!("Lock", "Mountpoints", {
+            let mps = self.mountpoints.read().await;
+            if !mps.is_empty() {
+                warn!("Some mountpoints remained after cleanup: {} mountpoints", mps.len());
+            } else {
+                debug!("All mountpoints successfully cleaned up");
+            }
+        });
+    }
+
+    pub async fn cleanup_drives(&self) {
+        trace!("Starting cleanup of all drives");
+        
+        // Get a list of all drives to clean up
+        let drive_numbers: Vec<u8> = locking_section!("Read", "Drives", {
+            let drives = self.drives.read().await;
+            drives.keys().cloned().collect()
+        });
+
+        // Clean up each drive individually
+        for device_number in drive_numbers {
+            match self.remove_drive(device_number).await {
+                Ok(_) => info!("Successfully cleaned up drive {}", device_number),
+                Err(DriveError::DriveBusy(num)) => {
+                    warn!("Drive {} is busy during cleanup - forcing removal", num);
+                    // Force remove from hashmap even if busy
+                    locking_section!("Write", "Drives", {
+                        self.drives.write().await.remove(&num);
+                    });
+                }
+                Err(e) => warn!("Failed to clean up drive {}: {}", device_number, e),
+            }
+        }
+
+        // Final verification that drives are empty
+        locking_section!("Read", "Drives", {
+            let drives = self.drives.read().await;
+            if !drives.is_empty() {
+                warn!("Some drives remained after cleanup: {} drives", drives.len());
+            } else {
+                debug!("All drives successfully cleaned up");
+            }
+        });
     }
 }

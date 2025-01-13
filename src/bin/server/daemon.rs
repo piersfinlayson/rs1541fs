@@ -64,7 +64,7 @@ pub struct Daemon {
     bg_proc_handle: Option<JoinHandle<()>>,
 
     // Background response handler
-    bg_rsp_handle: Option<JoinHandle<()>>,
+    bg_listener_handle: Option<JoinHandle<()>>,
 
     // Flag to shutdown Background Processor,
     bg_proc_shutdown: Arc<AtomicBool>,
@@ -100,14 +100,14 @@ impl Daemon {
             bg_proc: None,
             bg_proc_handle: None,
             bg_proc_shutdown,
-            bg_rsp_handle: None,
+            bg_listener_handle: None,
         };
 
         Ok(daemon)
     }
 
-    pub fn take_bg_rsp_handle(&mut self) -> JoinHandle<()> {
-        self.bg_rsp_handle.take().unwrap()
+    pub fn take_bg_listener_handle(&mut self) -> JoinHandle<()> {
+        self.bg_listener_handle.take().unwrap()
     }
 
     pub fn take_bg_proc_handle(&mut self) -> JoinHandle<()> {
@@ -148,7 +148,7 @@ impl Daemon {
             let mut guard = ipc_server.lock().await;
             trace!("Calling main IPC server start routine");
             let (bg_handle, ipc_handle) = guard.start(bg_rsp_rx).await?; // Actually wait for start() to complete
-            self.bg_rsp_handle = Some(bg_handle);
+            self.bg_listener_handle = Some(bg_handle);
             self.ipc_server_handle = Some(ipc_handle);
             trace!("Main IPC server start routine returned");
         });
@@ -212,16 +212,11 @@ impl Daemon {
         }
     }
 
-    pub async fn stop_ipc_server(&mut self, hard: bool) -> () {
+    pub async fn stop_ipc_all(&mut self, hard: bool) -> () {
         if self.ipc_server.is_some() {
             if !hard {
-                self.ipc_server
-                    .as_ref()
-                    .unwrap()
-                    .lock()
-                    .await
-                    .stop_ipc_listener();
-                debug!("Signaled IPC server to shutdown");
+                self.ipc_server.as_ref().unwrap().lock().await.stop_all();
+                debug!("Signaled IPC server to shutdown all threads");
             } else {
                 if let Some(handle) = &self.ipc_server_handle {
                     debug!("Stopping background processor thread");
@@ -237,5 +232,11 @@ impl Daemon {
         } else {
             info!("Told to stop IPC server, but it isn't running");
         }
+    }
+
+    pub async fn cleanup_drive_mgr(&self) -> () {
+        trace!("Entered cleanup_drive_mgr");
+        self.drive_mgr.lock().await.cleanup_mounts().await;
+        self.drive_mgr.lock().await.cleanup_drives().await;
     }
 }

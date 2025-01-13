@@ -20,6 +20,8 @@ use tokio::sync::Mutex;
 
 // Max number of BackgroundProcess channels which willbe opened
 pub const MAX_BG_CHANNELS: usize = 16;
+const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
+const MAX_OPERATION_AGE: Duration = Duration::from_secs(300);
 
 /// Background operation types for Commodore disk operations
 #[derive(Debug, Clone)]
@@ -589,45 +591,35 @@ impl Proc {
     }
 
     pub async fn run(&mut self) {
-        const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
-        const MAX_OPERATION_AGE: Duration = Duration::from_secs(300);
-
+    
         info!("Background operation processor ready");
-
+    
         while !self.shutdown.load(Ordering::Relaxed) {
-            // Periodic cleanup
-            if self.last_cleanup.elapsed() >= CLEANUP_INTERVAL {
-                self.queues.cleanup(MAX_OPERATION_AGE).await;
-                self.last_cleanup = Instant::now();
-            }
-
-            // Check for new operations until we run out
-            while let Ok(op) = self.operation_receiver.try_recv() {
-                self.queues.push(op);
-            }
-
-            // Process next operation if available
-            if let Some(op) = self.queues.pop_next() {
-                // pop_next() takes the oldest highest priority operation
-                // off the queue
-                let current_op = op;
-
-                // Process using the local copy
-                match self.process_operation(current_op).await {
-                    Ok(_) => debug!("Background operation succeeded"),
-                    Err(e) => warn!("Background operation failed {}", e),
+            tokio::select! {
+                // Periodic cleanup check
+                _ = tokio::time::sleep(CLEANUP_INTERVAL) => {
+                    self.queues.cleanup(MAX_OPERATION_AGE).await;
+                    self.last_cleanup = Instant::now();
                 }
+    
+                // Process operations
+                _ = async {
+                    // Check for new operations until we run out
+                    while let Ok(op) = self.operation_receiver.try_recv() {
+                        self.queues.push(op);
+                    }
+    
+                    // Process next operation if available
+                    if let Some(op) = self.queues.pop_next() {
+                        match self.process_operation(op).await {
+                            Ok(_) => debug!("Background operation succeeded"),
+                            Err(e) => warn!("Background operation failed {}", e),
+                        }
+                    }
+                } => {}
             }
-
-            // This sleep is _crucial_ as we are using try_recv() not recv().
-            // Otherwise this would be a tight loop and tokio might never
-            // get the opportunity to process the send() call (in send_resp())
-            // and actually send the message back.  (Once 4-5 messages are
-            // backed up it tends to schedule them.)  With this 10ms timer
-            // everything else on this thread has enough time!
-            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-
+    
         info!("Background operation processor exited");
     }
 }

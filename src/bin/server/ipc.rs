@@ -32,11 +32,15 @@ use tokio::time::sleep;
 pub const MAX_BG_RSP_CHANNELS: usize = 4;
 pub const BG_LIST_WAIT_TIME_MS: u64 = 100;
 
+const BG_LISTENER_SHUTDOWN_CHECK_DUR: Duration = Duration::from_millis(50);
+const IPC_SERVER_SHUTDOWN_CHECK_DUR: Duration = Duration::from_millis(50);
+
 #[derive(Debug, Clone)]
 pub struct IpcServer {
-    // Whether we should be running - if w are running and this is set to
+    // Whether we should be running - if we are running and this is set to
     // false, we will exit
-    run: Arc<AtomicBool>,
+    ipc_server_run: Arc<AtomicBool>,
+    bg_listener_run: Arc<AtomicBool>,
 
     // Our pid - needed to handle Kill (where we sent a SIGTERM to ourselves)
     pid: Pid,
@@ -64,7 +68,8 @@ impl IpcServer {
         // Processor on multiple messages (all of them!)
         let shared_bg_rsp_tx = bg_rsp_tx;
         Self {
-            run: Arc::new(AtomicBool::new(false)),
+            ipc_server_run: Arc::new(AtomicBool::new(false)),
+            bg_listener_run: Arc::new(AtomicBool::new(false)),
             pid,
             bg_proc_tx,
             bg_rsp_tx: shared_bg_rsp_tx,
@@ -246,57 +251,77 @@ impl IpcServer {
 
     async fn cleanup_socket(&self) {
         debug!("Entered cleanup_socket");
-        self.run.store(false, Ordering::SeqCst);
+        self.ipc_server_run.store(false, Ordering::SeqCst);
         Self::remove_socket_if_exists().await;
     }
 
     async fn start_ipc_listener(&self) -> Result<JoinHandle<()>, DaemonError> {
-        self.run.store(true, Ordering::SeqCst);
+        self.ipc_server_run.store(true, Ordering::SeqCst);
         let listener = self.setup_socket().await?;
-
+    
         info!("IPC server ready to accept connections on {}", SOCKET_PATH);
-
+    
         // Create a clone of self for the spawned task
         let self_clone = self.clone();
-
+    
         // Spawn the listener loop in its own task
         let handle = tokio::spawn(async move {
-            while self_clone.run.load(Ordering::SeqCst) {
-                match listener.accept().await {
-                    Ok((mut stream, addr)) => {
-                        debug!("IPC server accepted new connection from {:?}", addr);
-                        // Receive the request from stream, then handle it
-                        match self_clone.receive_request(&mut stream).await {
-                            Ok(req) => {
-                                if let Err(e) = self_clone.handle_client_request(stream, req).await
-                                {
-                                    warn!("Error handling client request: {}", e);
+            debug!("IPC listener ready");
+            // Use tokio::select! to handle both the accept() and periodic check
+            loop {
+                tokio::select! {
+                    // Check if we should continue running every second
+                    _ = tokio::time::sleep(IPC_SERVER_SHUTDOWN_CHECK_DUR) => {
+                        if !self_clone.ipc_server_run.load(Ordering::SeqCst) {
+                            break;
+                        }
+                    }
+                    accept_result = listener.accept() => {
+                        match accept_result {
+                            Ok((mut stream, addr)) => {
+                                debug!("IPC server accepted new connection from {:?}", addr);
+                                // Receive the request from stream, then handle it
+                                match self_clone.receive_request(&mut stream).await {
+                                    Ok(req) => {
+                                        if let Err(e) = self_clone.handle_client_request(stream, req).await {
+                                            warn!("Error handling client request: {}", e);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        debug!("Hit error receiving request from client {}", e);
+                                    }
                                 }
                             }
                             Err(e) => {
-                                debug!("Hit error receiving request from client {}", e);
+                                error!("Error accepting connection: {}", e);
+                                // Small delay to prevent tight loop on persistent errors
+                                tokio::time::sleep(Duration::from_millis(BG_LIST_WAIT_TIME_MS)).await;
                             }
                         }
                     }
-                    Err(e) => {
-                        error!("Error accepting connection: {}", e);
-                        // Small delay to prevent tight loop on persistent errors
-                        tokio::time::sleep(Duration::from_millis(BG_LIST_WAIT_TIME_MS)).await;
-                    }
                 }
             }
-
+    
             info!("IPC server exited");
             self_clone.cleanup_socket().await;
         });
-
+    
         Ok(handle)
     }
 
-    /// Not async, so can be called by signal_handler
     pub fn stop_ipc_listener(&self) {
-        debug!("Entered stop_ipc_listener");
-        self.run.store(false, Ordering::SeqCst);
+        trace!("Entered stop_ipc_listener");
+        self.ipc_server_run.store(false, Ordering::SeqCst);
+    }
+
+    pub fn stop_bg_listener(&self) {
+        trace!("Entered stop_bg_listener");
+        self.bg_listener_run.store(false, Ordering::SeqCst);
+    }
+
+    pub fn stop_all(&self) {
+        self.stop_ipc_listener();
+        self.stop_bg_listener();
     }
 
     async fn start_bg_receiver(
@@ -305,49 +330,60 @@ impl IpcServer {
     ) -> Result<JoinHandle<()>, DaemonError> {
         trace!("Entered start_background_receiver");
         let mut rx = bg_rsp_rx;
-
+    
         info!(
             "Starting bg receiver with channel capacity: {}",
             rx.capacity()
         );
-
+    
+        let bg_listener_run = self.bg_listener_run.clone();
+        bg_listener_run.store(true, Ordering::SeqCst);
         let handle = tokio::spawn(async move {
             debug!("IPC background response processor ready");
             loop {
-                trace!("At start of Background response processor loop");
-                let recv_rsp = rx.recv().await;
-                trace!("Background response processor recv returned");
-                match recv_rsp {
-                    Some(resp) => {
-                        debug!("Received response from background processor {:?}", resp);
-                        match resp {
-                            Ok(resp) => {
-                                if let Some(mut stream) = resp.stream {
-                                    if let Err(e) =
-                                        Self::send_response(&mut stream, resp.rsp_type.into()).await
-                                    {
-                                        warn!("Failed to send response back to client {}", e);
-                                    } else {
-                                        info!("Successfully sent response back to client");
-                                    }
-                                } else {
-                                    warn!("No stream on response - cannot send response to the client");
-                                }
-                            }
-                            Err(e) => {
-                                warn!("Got error from background processing {}", e);
-                            }
+                tokio::select! {
+                    // Check if we should continue running every second
+                    _ = tokio::time::sleep(BG_LISTENER_SHUTDOWN_CHECK_DUR) => {
+                        if !bg_listener_run.load(Ordering::SeqCst) {
+                            trace!("IPC background response processor shutdown requested");
+                            break;
                         }
                     }
-                    None => {
-                        warn!("Channel closed, exiting bg receiver");
-                        break;
+                    recv_rsp = rx.recv() => {
+                        trace!("Background response processor recv returned");
+                        match recv_rsp {
+                            Some(resp) => {
+                                debug!("Received response from background processor {:?}", resp);
+                                match resp {
+                                    Ok(resp) => {
+                                        if let Some(mut stream) = resp.stream {
+                                            if let Err(e) =
+                                                Self::send_response(&mut stream, resp.rsp_type.into()).await
+                                            {
+                                                warn!("Failed to send response back to client {}", e);
+                                            } else {
+                                                info!("Successfully sent response back to client");
+                                            }
+                                        } else {
+                                            warn!("No stream on response - cannot send response to the client");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!("Got error from background processing {}", e);
+                                    }
+                                }
+                            }
+                            None => {
+                                warn!("Channel closed, exiting bg receiver");
+                                break;
+                            }
+                        }
                     }
                 }
             }
             trace!("IPC background response processor exited");
         });
-
+    
         trace!("Exiting start_background_receiver");
         Ok(handle)
     }

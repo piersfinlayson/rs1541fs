@@ -394,6 +394,8 @@ pub fn petscii_to_ascii(input: &[u8]) -> String {
 
 impl Drop for OpenCbm {
     fn drop(&mut self) {
-        let _ = self.close();
+        if let Err(e) = self.close() {
+            error!("Error closing CBM device: {}", e);
+        }
     }
 }

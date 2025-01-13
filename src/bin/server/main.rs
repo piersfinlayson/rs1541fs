@@ -11,17 +11,19 @@ use args::Args;
 use daemon::Daemon;
 use error::DaemonError;
 use rs1541fs::cbm::Cbm;
+use rs1541fs::ipc::DAEMON_PID_FILENAME;
 use rs1541fs::logging::init_logging;
 
 use daemonize::Daemonize;
 use log::{debug, error, info, trace, warn};
 use nix::unistd::getpid;
 use scopeguard::defer;
-use signal::{create_signal_handler, get_pid_filename};
+use signal::SignalHandler;
 use std::fs;
 use std::panic;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 
 /// Example usage:
@@ -73,6 +75,10 @@ macro_rules! locking_section {
         };
         $block
     }};
+}
+
+pub fn get_pid_filename() -> PathBuf {
+    DAEMON_PID_FILENAME.into()
 }
 
 fn check_pid_file() -> Result<(), DaemonError> {
@@ -165,14 +171,7 @@ async fn main() -> Result<(), DaemonError> {
 
     // Now create the daemon object
     let daemon = Daemon::new(pid, shared_cbm)?;
-
-    // Set up signal handler - we can do this as soon as we have Daemon
-    // If SIGTERM or SIGINT are raised before we get here then everything
-    // should clean up OK - except there is a small window where the pid file
-    // has been created but not deleted.  Nothing we can do about this, and
-    // when we restart we'll overwrite it if it exists.
     let shared_daemon = Arc::new(Mutex::new(daemon));
-    let _signal_handler = create_signal_handler(shared_daemon.clone());
 
     // Create the Background Processor and IPC processor
     trace!("Create Background Processor");
@@ -213,10 +212,24 @@ async fn main() -> Result<(), DaemonError> {
     let ipc_server_handle = locking_section!("Lock", "Daemon", {
         shared_daemon.lock().await.take_ipc_server_handle_ref()
     });
-    let bg_rsp_handle = locking_section!("Lock", "Daemon", {
-        shared_daemon.lock().await.take_bg_rsp_handle()
+    let bg_listener_handle = locking_section!("Lock", "Daemon", {
+        shared_daemon.lock().await.take_bg_listener_handle()
     });
 
+    // Create new abort handles for the tasks - this allows us to join to them
+    // in our signal handling code, while using the join handles (above) in
+    // tokio::select!.
+    let bg_proc_abort = bg_proc_handle.abort_handle();
+    let bg_proc_abort2 = bg_proc_handle.abort_handle();
+    let ipc_server_abort = ipc_server_handle.abort_handle();
+    let ipc_server_abort2 = ipc_server_handle.abort_handle();
+    let bg_listener_abort = bg_listener_handle.abort_handle();
+    let bg_listener_abort2 = bg_listener_handle.abort_handle();
+
+    // Set up signal handler - it runs in the select below
+    let signal_handler = SignalHandler::new();
+
+    // Main select - waiting until one of these event occurs
     tokio::select! {
         result = bg_proc_handle => {
             warn!("Background processing thread has exited");
@@ -232,11 +245,52 @@ async fn main() -> Result<(), DaemonError> {
                 return Err(DaemonError::InternalError("IPC server failed".into()));
             }
         }
-        result = bg_rsp_handle => {
+        result = bg_listener_handle => {
             warn!("Background response thread has exited");
             if let Err(e) = result {
                 error!("Background response thread failed: {}", e);
                 return Err(DaemonError::InternalError("Background response thread failed".into()));
+            }
+        }
+        _ = signal_handler.handle_signals() => {
+            info!("Starting shutdown sequence");
+
+            // Clone the arc/mutex if needed for the shared daemon
+            let shared_daemon = shared_daemon.clone();
+
+            let cleanup = async move {
+                // Initiate shutdown - need to await on stop_ipc_all() as it's
+                // async
+                shared_daemon.lock().await.stop_bg_proc(false);
+                shared_daemon.lock().await.stop_ipc_all(false).await;
+                shared_daemon.lock().await.cleanup_drive_mgr().await;
+                while !bg_proc_abort2.is_finished() ||
+                    !ipc_server_abort2.is_finished() ||
+                    !bg_listener_abort2.is_finished() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }};
+
+            match tokio::time::timeout(Duration::from_secs(5), cleanup).await {
+                Ok(_) => {
+                    info!("Cleanup completed");
+                    assert!(bg_proc_abort.is_finished());
+                    assert!(ipc_server_abort.is_finished());
+                    assert!(bg_listener_abort.is_finished());
+                },
+                Err(_) => {
+                    error!("Cleanup timed out - forcing exit");
+                    // Abort any remaining tasks
+                    if !bg_proc_abort.is_finished() {
+                        bg_proc_abort.abort();
+                    }
+                    if !ipc_server_abort.is_finished() {
+                        ipc_server_abort.abort();
+                    }
+                    if !bg_listener_abort.is_finished() {
+                        bg_listener_abort.abort();
+                    }
+                    std::process::exit(1);
+                }
             }
         }
     }
