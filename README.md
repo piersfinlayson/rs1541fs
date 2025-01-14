@@ -11,7 +11,7 @@ Before building rs1541fs for the first time you must install the build dependenc
 rs1541fs relies on OpenCBM.  You must build and install OpenCBM.  I've made a few mods to OpenCBM to make it work more reliably so I suggest you use my form.  You can build and isntall it like this:
 
 ```
-sudo apt-get install build-essential libusb-dev cc65 linux-headers-$(uname -r)
+sudo apt-get install build-essential libusb-1.0-0-dev cc65 linux-headers-$(uname -r)
 git clone https://github.com/piersfinlayson/OpenCBM
 cd OpemCBM
 make -f LINUX/Makefile plugin
@@ -152,3 +152,39 @@ Then reattach your USB device (XUM1541) and try ```cbmctrl detect" again.  Until
 ### WSL
 
 You can use WSL (WSL2 to be precise) run rs1541fs.  You must use usbipd in order to connect your XUM1541 USB device to the WSL kernel.  I've found that this stops working after a while, and the wsl instance must be shutdown and restarted in order to get it working again.
+
+### libusb1.0
+
+While OpenCBM and the XUM1541 code supports both libusb0.1 and 1.0 I strongly recommend you use 1.0 - the apt install command earlier in this file installs the correct libusb1.0 packages.
+
+With libusb0.1 I've seen odd segmentation faults and other issues.
+
+To verify you really are using libusb1.0 run this after installing OpenCBM and the XUM1541 plugin):
+
+```
+ldd /usr/local/lib/opencbm/plugin/libopencbm-xum1541.so
+```
+
+You should see something like this:
+
+```
+linux-vdso.so.1 (0x00007ffc21171000)
+        libusb-1.0.so.0 => /lib/x86_64-linux-gnu/libusb-1.0.so.0 (0x00007fa4566ac000)
+        libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007fa456483000)
+        libudev.so.1 => /lib/x86_64-linux-gnu/libudev.so.1 (0x00007fa456459000)
+        /lib64/ld-linux-x86-64.so.2 (0x00007fa4566df000)
+```
+
+In particular ```libusb.1.0.so.0```.
+
+If you haven't linked with the correct version of libusb, try running:
+
+```
+pkg-config --cflags libusb-1.0
+```
+
+OpenCBM XUM1541 uses this within ```opencbm/Linux/config.make``` to configure the build, and will fall bck to libusb-0.1 if it doesn't get a sensible response.  The response should look something like this:
+
+```
+-I/usr/include/libusb-1.0
+```
