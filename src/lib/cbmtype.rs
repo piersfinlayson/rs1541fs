@@ -212,6 +212,20 @@ pub struct CbmStatus {
     pub device: u8,
 }
 
+// Required trait implementations
+impl Default for CbmStatus {
+    fn default() -> Self {
+        CbmStatus {
+            number: 255,
+            error_number: CbmErrorNumber::default(),
+            message: "none".to_string(),
+            track: 0,
+            sector: 0,
+            device: 0,
+        }
+    }
+}
+
 impl CbmStatus {
     pub fn new(status: &str, device: u8) -> Result<Self, CbmError> {
         trace!("Received device status from device {}: {}", device, status);
@@ -403,6 +417,15 @@ pub struct CbmDeviceInfo {
     pub description: String,
 }
 
+impl Default for CbmDeviceInfo {
+    fn default() -> Self {
+        CbmDeviceInfo {
+            device_type: CbmDeviceType::default(),
+            description: "unknown".to_string(),
+        }
+    }
+}
+
 impl fmt::Display for CbmDeviceInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: {}", self.device_type, self.description)
@@ -427,6 +450,12 @@ pub enum CbmDeviceType {
     Cbm8250 = 10,
     Sfd1001 = 11,
     FdX000 = 12,
+}
+
+impl Default for CbmDeviceType {
+    fn default() -> Self {
+        CbmDeviceType::Unknown
+    }
 }
 
 impl fmt::Display for CbmDeviceType {
@@ -575,6 +604,12 @@ pub enum CbmErrorNumber {
     DriveNotReady = 74,
     OpenCbm = 99,
     Unknown = 255,
+}
+
+impl Default for CbmErrorNumber {
+    fn default() -> Self {
+        CbmErrorNumber::Unknown
+    }
 }
 
 impl From<u8> for CbmErrorNumber {

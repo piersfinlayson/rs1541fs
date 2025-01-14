@@ -5,6 +5,7 @@ mod drivemgr;
 mod error;
 mod ipc;
 mod mount;
+mod mountsvc;
 mod signal;
 
 use args::Args;
@@ -33,17 +34,17 @@ const NUM_WORKER_THREADS: usize = 8;
 /// locking_section!("Write", "config", {
 ///     let mut lock = config.write().await;
 ///     lock.update(new_value);
-/// });  // Logs: "Write Locking config" -> "Write Unlocking config"
+/// });  // Logs: "LOCK WRITE config" -> "UNLOCK WRITE config"
 ///
 /// locking_section!("Read", "data", {
 ///     let lock = data.read().await;
 ///     process(&*lock);
-/// });  // Logs: "Read Locking data" -> "Read Unlocking data"
+/// });  // Logs: "LOCK READ data" -> "UNLOCK READ data"
 ///
 /// locking_section!("Lock", "mutex", {
 ///     let mut lock = mutex.lock().await;
 ///     lock.push(item);
-/// });  // Logs: "Locking mutex" -> "Unlocking mutex"
+/// });  // Logs: "LOCK mutex" -> "UNLOCK mutex"
 #[macro_export]
 macro_rules! locking_section {
     ($lock_type:expr, $lock_name:expr, $block:expr) => {{
@@ -55,20 +56,20 @@ macro_rules! locking_section {
         impl<'a> Drop for _DebugUnlock<'a> {
             fn drop(&mut self) {
                 let unlock_msg = match self.lock_type {
-                    "Read" => format!("Read Unlocking {}", self.name),
-                    "Write" => format!("Write Unlocking {}", self.name),
-                    "Lock" => format!("Unlocking {}", self.name),
-                    other => format!("{} Unlocking {}", other, self.name),
+                    "Read" => format!("UNLOCK READ {}", self.name),
+                    "Write" => format!("UNLOCK WRITE {}", self.name),
+                    "Lock" => format!("UNLOCK {}", self.name),
+                    other => format!("UNLOCK {} {}", other, self.name),
                 };
                 trace!("{}", unlock_msg);
             }
         }
 
         let lock_msg = match $lock_type {
-            "Read" => format!("Read Locking {}", $lock_name),
-            "Write" => format!("Write Locking {}", $lock_name),
-            "Lock" => format!("Locking {}", $lock_name),
-            other => format!("{} Locking {}", other, $lock_name),
+            "Read" => format!("LOCK READ {}", $lock_name),
+            "Write" => format!("LOCK WRITE {}", $lock_name),
+            "Lock" => format!("LOCK {}", $lock_name),
+            other => format!("LOCK {} {}", other, $lock_name),
         };
         trace!("{}", lock_msg);
 

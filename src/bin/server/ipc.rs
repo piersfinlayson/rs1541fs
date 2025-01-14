@@ -9,7 +9,7 @@
 use rs1541fs::ipc::Request::{self, BusReset, Die, GetStatus, Identify, Mount, Ping, Unmount};
 use rs1541fs::ipc::{Response, SOCKET_PATH};
 
-use crate::bg::{OpType, Operation, Priority, ProcError, Resp, RspType};
+use crate::bg::{OpError, OpResponse, OpResponseType, OpType, Operation, Priority};
 use crate::error::DaemonError;
 use crate::mount::{validate_mount_request, validate_unmount_request};
 
@@ -51,7 +51,7 @@ pub struct IpcServer {
     // The Sender to give to BackgroundProcess to send respones back
     // This doesn't need to be Mutexed, as Senders implement Send, but does
     // need to be an Arc
-    bg_rsp_tx: Arc<Sender<Result<Resp, ProcError>>>,
+    bg_rsp_tx: Arc<Sender<OpResponse>>,
 }
 
 /// IPC Server does not store the bg_rsp_rx (an mpsc:channel Receiver), because
@@ -62,7 +62,7 @@ impl IpcServer {
     pub fn new(
         pid: Pid,
         bg_proc_tx: Arc<Sender<Operation>>,
-        bg_rsp_tx: Arc<Sender<Result<Resp, ProcError>>>,
+        bg_rsp_tx: Arc<Sender<OpResponse>>,
     ) -> Self {
         // We need a Mutex for the TX half, so we can give it to the Background
         // Processor on multiple messages (all of them!)
@@ -324,7 +324,7 @@ impl IpcServer {
 
     async fn start_bg_receiver(
         &mut self,
-        bg_rsp_rx: Receiver<Result<Resp, ProcError>>,
+        bg_rsp_rx: Receiver<OpResponse>,
     ) -> Result<JoinHandle<()>, DaemonError> {
         trace!("Entered start_background_receiver");
         let mut rx = bg_rsp_rx;
@@ -350,25 +350,17 @@ impl IpcServer {
                     recv_rsp = rx.recv() => {
                         trace!("Background response processor recv returned");
                         match recv_rsp {
-                            Some(resp) => {
+                            Some(mut resp) => {
                                 debug!("Received response from background processor {:?}", resp);
-                                match resp {
-                                    Ok(resp) => {
-                                        if let Some(mut stream) = resp.stream {
-                                            if let Err(e) =
-                                                Self::send_response(&mut stream, resp.rsp_type.into()).await
-                                            {
-                                                warn!("Failed to send response back to client {}", e);
-                                            } else {
-                                                info!("Successfully sent response back to client");
-                                            }
-                                        } else {
-                                            warn!("No stream on response - cannot send response to the client");
-                                        }
+                                if let Some(mut stream) = resp.stream.take() {
+                                    let cli_resp = Response::from(OpResponseWrapper(Ok(resp)));
+                                    if let Err(e) = Self::send_response(&mut stream, cli_resp).await {
+                                        warn!("Failed to send response back to client {}", e);
+                                    } else {
+                                        info!("Successfully sent response back to client");
                                     }
-                                    Err(e) => {
-                                        warn!("Got error from background processing {}", e);
-                                    }
+                                } else {
+                                    warn!("No stream on response - cannot send response to the client");
                                 }
                             }
                             None => {
@@ -388,7 +380,7 @@ impl IpcServer {
 
     pub async fn start(
         &mut self,
-        bg_rsp_rx: Receiver<Result<Resp, ProcError>>,
+        bg_rsp_rx: Receiver<OpResponse>,
     ) -> Result<(JoinHandle<()>, JoinHandle<()>), DaemonError> {
         // Start our listeners/receivers
         // Start the background receiver before the IPC listener as otherwise
@@ -401,19 +393,27 @@ impl IpcServer {
     }
 }
 
-impl From<RspType> for Response {
-    fn from(rsp: RspType) -> Self {
-        match rsp {
-            RspType::Mount() => Response::MountSuccess,
-            RspType::Unmount() => Response::UnmountSuccess,
-            RspType::BusReset() => Response::BusResetSuccess,
-            RspType::Identify { info } => Response::Identified {
-                device_type: info.device_type.as_str().to_string(),
-                description: info.description,
+pub struct OpResponseWrapper(Result<OpResponse, OpError>);
+
+// Implement From for your newtype
+impl From<OpResponseWrapper> for Response {
+    fn from(wrapper: OpResponseWrapper) -> Self {
+        match wrapper.0 {
+            Ok(op_response) => match op_response.rsp {
+                Ok(response_type) => match response_type {
+                    OpResponseType::Mount() => Response::MountSuccess,
+                    OpResponseType::Unmount() => Response::UnmountSuccess,
+                    OpResponseType::BusReset() => Response::BusResetSuccess,
+                    OpResponseType::Identify { info } => Response::Identified {
+                        device_type: info.device_type.as_str().to_string(),
+                        description: info.description,
+                    },
+                    OpResponseType::GetStatus { status } => Response::GotStatus(status.to_string()),
+                    _ => Response::Error("Unsupported response type".to_string()),
+                },
+                Err(e) => Response::Error(e.to_string()),
             },
-            RspType::GetStatus { status } => Response::GotStatus(status.to_string()),
-            // All other cases default to Error with a descriptive message
-            _ => Response::Error("Unsupported response type".to_string()),
+            Err(e) => Response::Error(e.to_string()),
         }
     }
 }

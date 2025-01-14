@@ -3,7 +3,7 @@ use rs1541fs::cbmtype::{CbmError, CbmErrorNumber};
 use rs1541fs::validate::{validate_device, validate_mountpoint, DeviceValidation, ValidationType};
 
 use crate::args::get_args;
-use crate::bg::{Operation, ProcError};
+use crate::bg::{OpError, Operation};
 use crate::drivemgr::{DriveError, DriveManager};
 use crate::locking_section;
 
@@ -96,20 +96,8 @@ impl From<DriveError> for MountError {
                 MountError::CbmError(format!("Drive {} already exists", device))
             }
 
-            DriveError::MountExists(mountpoint) => {
-                MountError::CbmError(format!("Mountpoint {} already exists", mountpoint))
-            }
-
             DriveError::DriveNotFound(device) => {
                 MountError::CbmError(format!("Drive {} not found", device))
-            }
-
-            DriveError::MountNotFound(path) => {
-                MountError::CbmError(format!("Mountpoint {} not found", path))
-            }
-
-            DriveError::BusInUse(device) => {
-                MountError::CbmError(format!("Bus is in use by drive {}", device))
             }
 
             DriveError::InvalidDeviceNumber(device) => {
@@ -142,14 +130,6 @@ impl From<DriveError> for MountError {
 
             DriveError::InvalidState(device, msg) => {
                 MountError::CbmError(format!("Invalid drive state: {} device {}", msg, device))
-            }
-
-            DriveError::BusResetInProgress => {
-                MountError::CbmError("Bus reset in progress".to_string())
-            }
-
-            DriveError::ConcurrencyError(msg) => {
-                MountError::InternalError(format!("Concurrent operation conflict: {}", msg))
             }
 
             DriveError::OpenCbmError(device, msg) => MountError::CbmError(format!(
@@ -187,12 +167,13 @@ impl std::error::Error for MountError {}
 pub struct Mount {
     device_num: u8,
     mountpoint: PathBuf,
+    _dummy_formats: bool,
     cbm: Arc<Mutex<Cbm>>,
     drive_mgr: Arc<Mutex<DriveManager>>,
     drive_unit: Arc<RwLock<CbmDriveUnit>>,
     bg_proc_tx: Arc<Sender<Operation>>,
-    bg_rsp_tx: Arc<Sender<Result<(), ProcError>>>,
-    bg_rsp_rx: Arc<Mutex<Receiver<Result<(), ProcError>>>>,
+    bg_rsp_tx: Arc<Sender<Result<(), OpError>>>,
+    bg_rsp_rx: Arc<Mutex<Receiver<Result<(), OpError>>>>,
     directory_cache: Arc<RwLock<DirectoryCache>>,
     fuser: Option<Arc<Mutex<BackgroundSession>>>,
 }
@@ -218,6 +199,7 @@ impl Mount {
     pub fn new<P: AsRef<Path>>(
         device_num: u8,
         mountpoint: P,
+        dummy_formats: bool,
         cbm: Arc<Mutex<Cbm>>,
         drive_mgr: Arc<Mutex<DriveManager>>,
         drive_unit: Arc<RwLock<CbmDriveUnit>>,
@@ -241,6 +223,7 @@ impl Mount {
         Ok(Self {
             device_num,
             mountpoint: mountpoint.as_ref().to_path_buf(),
+            _dummy_formats: dummy_formats,
             cbm,
             drive_mgr,
             drive_unit,

@@ -5,10 +5,12 @@ use rs1541fs::cbmtype::{CbmError, CbmStatus};
 
 use crate::drivemgr::{DriveError, DriveManager};
 use crate::locking_section;
+use crate::mount::Mount;
+use crate::mountsvc::{MountService, MountSvcError};
 
 use log::{debug, error, info, trace, warn};
-use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,7 +18,7 @@ use std::time::Instant;
 use thiserror::Error;
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 // Max number of BackgroundProcess channels which willbe opened
 pub const MAX_BG_CHANNELS: usize = 16;
@@ -159,19 +161,91 @@ impl OpType {
 }
 
 #[derive(Debug)]
-pub struct Resp {
-    pub rsp_type: RspType,
+pub struct OpResponse {
+    pub rsp: Result<OpResponseType, OpError>,
     pub stream: Option<OwnedWriteHalf>,
 }
 
-impl std::fmt::Display for Resp {
+impl std::fmt::Display for OpResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Resp of type: {}", self.rsp_type)
+        match &self.rsp {
+            Ok(response_type) => {
+                match response_type {
+                    OpResponseType::BusReset() => write!(f, "Bus Reset"),
+
+                    OpResponseType::Mount() => write!(f, "Mount"),
+
+                    OpResponseType::Unmount() => write!(f, "Unmount"),
+
+                    OpResponseType::ReadDirectory { status } => {
+                        write!(f, "Read Directory - {} entries", status.len())
+                    }
+
+                    OpResponseType::ReadFile {
+                        status, bytes_read, ..
+                    } => write!(
+                        f,
+                        "Read File - {} bytes read, status: {}",
+                        bytes_read, status
+                    ),
+
+                    OpResponseType::WriteFile {
+                        status,
+                        bytes_written,
+                    } => write!(
+                        f,
+                        "Write File - {} bytes written, status: {}",
+                        bytes_written, status
+                    ),
+
+                    OpResponseType::InitDrive { status } => {
+                        write!(f, "Init Drive - status: {}", status)
+                    }
+
+                    OpResponseType::ValidateDrive { status } => {
+                        write!(f, "Validate Drive - status: {}", status)
+                    }
+
+                    OpResponseType::Identify { info } => {
+                        write!(f, "Identify - device info: {}", info)
+                    }
+
+                    OpResponseType::GetStatus { status } => write!(f, "Get Status - {}", status),
+
+                    OpResponseType::UpdateDirectoryCache { status } => {
+                        write!(f, "Update Directory Cache - {} entries", status.len())
+                    }
+
+                    OpResponseType::ReadCacheFile {
+                        status, bytes_read, ..
+                    } => write!(
+                        f,
+                        "Read Cache File - {} bytes read, status: {}",
+                        bytes_read, status
+                    ),
+
+                    OpResponseType::InvalidateCache() => write!(f, "Invalidate Cache"),
+                }?;
+
+                // Add stream status if relevant
+                if self.stream.is_some() {
+                    write!(f, " (with stream)")?;
+                }
+                Ok(())
+            }
+            Err(error) => {
+                write!(f, "Error: {}", error)?;
+                if self.stream.is_some() {
+                    write!(f, " (with stream)")?;
+                }
+                Ok(())
+            }
+        }
     }
 }
 
 #[derive(Debug, Clone)]
-pub enum RspType {
+pub enum OpResponseType {
     BusReset(),
     Mount(),
     Unmount(),
@@ -180,7 +254,7 @@ pub enum RspType {
     },
     ReadFile {
         status: CbmStatus,
-        contents: Vec<u8>,
+        _contents: Vec<u8>,
         bytes_read: u64,
     },
     /// WriteFile returns stat
@@ -205,59 +279,70 @@ pub enum RspType {
     },
     ReadCacheFile {
         status: CbmStatus,
-        contents: Vec<u8>,
+        _contents: Vec<u8>,
         bytes_read: u64,
     },
     InvalidateCache(),
 }
 
-impl std::fmt::Display for RspType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RspType::BusReset() => write!(f, "Bus reset completed"),
-            RspType::Mount() => write!(f, "Drive mounted"),
-            RspType::Unmount() => write!(f, "Drive unmounted"),
-            RspType::ReadDirectory { status } => {
-                write!(f, "Directory read - {} drive(s) accessed", status.len())
+impl From<OpType> for OpResponseType {
+    fn from(op: OpType) -> Self {
+        match op {
+            OpType::BusReset => OpResponseType::BusReset(),
+
+            OpType::Mount { .. } => OpResponseType::Mount(),
+
+            OpType::Unmount { .. } => OpResponseType::Unmount(),
+
+            OpType::ReadDirectory => OpResponseType::ReadDirectory { status: Vec::new() },
+
+            OpType::ReadFile { .. } => OpResponseType::ReadFile {
+                status: CbmStatus::default(),
+                _contents: Vec::new(),
+                bytes_read: 0,
+            },
+
+            OpType::WriteFile { .. } => OpResponseType::WriteFile {
+                status: CbmStatus::default(),
+                bytes_written: 0,
+            },
+
+            OpType::InitDrive { .. } => OpResponseType::InitDrive {
+                status: CbmStatus::default(),
+            },
+
+            OpType::ValidateDrive { .. } => OpResponseType::ValidateDrive {
+                status: CbmStatus::default(),
+            },
+
+            OpType::Identify { .. } => OpResponseType::Identify {
+                info: CbmDeviceInfo::default(),
+            },
+
+            OpType::GetStatus { .. } => OpResponseType::GetStatus {
+                status: CbmStatus::default(),
+            },
+
+            OpType::UpdateDirectoryCache => {
+                OpResponseType::UpdateDirectoryCache { status: Vec::new() }
             }
-            RspType::ReadFile { bytes_read, .. } => {
-                write!(f, "Read {} bytes from file", bytes_read)
-            }
-            RspType::WriteFile { bytes_written, .. } => {
-                write!(f, "Wrote {} bytes to file", bytes_written)
-            }
-            RspType::InitDrive { status } => {
-                write!(f, "Drive initialized - status: {}", status)
-            }
-            RspType::ValidateDrive { status } => {
-                write!(f, "Drive validated - status: {}", status)
-            }
-            RspType::Identify { info } => {
-                write!(f, "Device identified: {:?}", info)
-            }
-            RspType::GetStatus { status } => {
-                write!(f, "Drive status: {}", status)
-            }
-            RspType::UpdateDirectoryCache { status } => {
-                write!(
-                    f,
-                    "Directory cache updated - {} drive(s) scanned",
-                    status.len()
-                )
-            }
-            RspType::ReadCacheFile { bytes_read, .. } => {
-                write!(f, "Read {} bytes from cached file", bytes_read)
-            }
-            RspType::InvalidateCache() => write!(f, "Cache invalidated"),
+
+            OpType::ReadCacheFile { .. } => OpResponseType::ReadCacheFile {
+                status: CbmStatus::default(),
+                _contents: Vec::new(),
+                bytes_read: 0,
+            },
+
+            OpType::InvalidateCache { .. } => OpResponseType::InvalidateCache(),
         }
     }
 }
 
 /// Errors that can occur during background processing
 #[derive(Error, Debug, Clone)]
-pub enum ProcError {
-    #[error("Operation timed out after {0:?}")]
-    OperationTimeout(Duration),
+pub enum OpError {
+    #[error("Operation for device {0} timed out")]
+    OperationTimeout(u8),
     #[error("Operation cancelled")]
     OperationCancelled,
     #[error("Mount {0} not found")]
@@ -276,56 +361,115 @@ pub enum ProcError {
     DeviceBusy(u8),
     #[error("Resource conflict: {0}")]
     ResourceConflict(String),
+    #[error("Device {0} initialization failed: {1}")]
+    DeviceInitError(u8, String),
+    #[error("Device {0} not responding: {1}")]
+    DeviceNotResponding(u8, String),
+    #[error("Device {0} reports error: {1}")]
+    DeviceError(u8, String),
 }
 
-impl From<DriveError> for ProcError {
-    fn from(err: DriveError) -> Self {
+impl From<MountSvcError> for OpError {
+    fn from(err: MountSvcError) -> Self {
         match err {
-            DriveError::DriveExists(dev) => {
-                ProcError::ResourceConflict(format!("Drive {} already exists", dev))
+            MountSvcError::MountpointNotFound(path) => OpError::MountNotFound(path),
+
+            MountSvcError::MountExists(path) => {
+                OpError::ResourceConflict(format!("Mount {} already exists", path))
             }
-            DriveError::MountExists(point) => {
-                ProcError::ResourceConflict(format!("Mountpoint {} already exists", point))
+
+            MountSvcError::DeviceExists(dev) => {
+                OpError::ResourceConflict(format!("Device {} already mounted", dev))
             }
-            DriveError::DriveNotFound(dev) => ProcError::DeviceNotFound(dev),
-            DriveError::MountNotFound(point) => ProcError::MountNotFound(point),
-            DriveError::BusInUse(dev) => {
-                ProcError::ResourceConflict(format!("Bus is in use by drive {}", dev))
+
+            MountSvcError::InvalidDeviceNumber(dev) => {
+                OpError::ValidationError(format!("Invalid device number {} (must be 0-31)", dev))
             }
-            DriveError::InvalidDeviceNumber(dev) => {
-                ProcError::ValidationError(format!("Invalid device number {} (must be 0-31)", dev))
-            }
-            DriveError::InitializationError(dev, msg) => {
-                ProcError::HardwareError(format!("Drive {} initialization failed: {}", dev, msg))
-            }
-            DriveError::BusError(msg) => ProcError::HardwareError(format!("Bus error: {}", msg)),
-            DriveError::Timeout(_dev) => ProcError::OperationTimeout(
-                Duration::from_secs(60), // You might want to pass the actual timeout duration
-            ),
-            DriveError::DriveNotResponding(dev, msg) => {
-                ProcError::HardwareError(format!("Drive {} not responding: {}", dev, msg))
-            }
-            DriveError::DriveError(dev, msg) => {
-                ProcError::HardwareError(format!("Drive {} error: {}", dev, msg))
-            }
-            DriveError::DriveBusy(dev) => ProcError::DeviceBusy(dev),
-            DriveError::InvalidState(dev, msg) => {
-                ProcError::InvalidState(format!("Drive {}: {}", dev, msg))
-            }
-            DriveError::BusResetInProgress => {
-                ProcError::InvalidState("Bus reset in progress".to_string())
-            }
-            DriveError::ConcurrencyError(msg) => ProcError::ResourceConflict(msg),
-            DriveError::OpenCbmError(dev, msg) => {
-                ProcError::HardwareError(format!("OpenCBM error on device {}: {}", dev, msg))
+
+            MountSvcError::BusError(msg) => OpError::HardwareError(format!("Bus error: {}", msg)),
+
+            MountSvcError::Timeout(device) => OpError::OperationTimeout(device),
+
+            MountSvcError::InternalError(msg) => OpError::InternalError(msg),
+
+            MountSvcError::DeviceNotFound(dev) => OpError::DeviceNotFound(dev),
+
+            MountSvcError::InitializationError(dev, msg) => OpError::DeviceInitError(dev, msg),
+
+            MountSvcError::DeviceNotResponding(dev, msg) => OpError::DeviceNotResponding(dev, msg),
+
+            MountSvcError::DeviceError(dev, msg) => OpError::DeviceError(dev, msg),
+
+            MountSvcError::DeviceBusy(dev) => OpError::DeviceBusy(dev),
+
+            MountSvcError::InvalidState(dev, state) => {
+                OpError::InvalidState(format!("Device {}: {}", dev, state))
             }
         }
     }
 }
 
-impl From<CbmError> for ProcError {
+impl From<DriveError> for OpError {
+    fn from(err: DriveError) -> Self {
+        match err {
+            DriveError::DriveExists(dev) => {
+                OpError::ResourceConflict(format!("Drive {} already exists", dev))
+            }
+            DriveError::DriveNotFound(dev) => OpError::DeviceNotFound(dev),
+            DriveError::InvalidDeviceNumber(dev) => {
+                OpError::ValidationError(format!("Invalid device number {} (must be 0-31)", dev))
+            }
+            DriveError::InitializationError(dev, msg) => OpError::DeviceInitError(dev, msg),
+            DriveError::BusError(msg) => OpError::HardwareError(format!("Bus error: {}", msg)),
+            DriveError::Timeout(device) => OpError::OperationTimeout(
+                device, // You might want to pass the actual timeout duration
+            ),
+            DriveError::DriveNotResponding(dev, msg) => OpError::DeviceNotResponding(dev, msg),
+            DriveError::DriveError(dev, msg) => OpError::DeviceError(dev, msg),
+            DriveError::DriveBusy(dev) => OpError::DeviceBusy(dev),
+            DriveError::InvalidState(dev, msg) => {
+                OpError::InvalidState(format!("Drive {}: {}", dev, msg))
+            }
+            DriveError::OpenCbmError(dev, msg) => {
+                OpError::HardwareError(format!("OpenCBM error on device {}: {}", dev, msg))
+            }
+        }
+    }
+}
+
+impl From<CbmError> for OpError {
     fn from(error: CbmError) -> Self {
-        ProcError::HardwareError(error.to_string())
+        match error {
+            CbmError::DeviceError { device, message } => OpError::DeviceError(device, message),
+
+            CbmError::ChannelError { device, message }
+            | CbmError::FileError { device, message }
+            | CbmError::CommandError { device, message } => {
+                OpError::HardwareError(format!("Device {}: {}", device, message))
+            }
+
+            CbmError::StatusError { device, status } => {
+                OpError::DeviceError(device, status.to_string())
+            }
+
+            CbmError::TimeoutError { device } => OpError::OperationTimeout(device),
+
+            CbmError::InvalidOperation { device, message } => {
+                OpError::InvalidState(format!("Device {}: {}", device, message))
+            }
+
+            CbmError::OpenCbmError { device, error } => {
+                let msg = match device {
+                    Some(dev) => format!("OpenCBM error on device {}: {}", dev, error),
+                    None => format!("OpenCBM error: {}", error),
+                };
+                OpError::HardwareError(msg)
+            }
+
+            CbmError::FuseError(errno) => OpError::HardwareError(format!("FUSE error: {}", errno)),
+
+            CbmError::ValidationError(msg) => OpError::ValidationError(msg),
+        }
     }
 }
 
@@ -340,7 +484,7 @@ pub enum Priority {
 }
 
 /// A background operation to be processed
-/// sender is the mpsc:Sender to use to send the RspType/ProcError back to the
+/// sender is the mpsc:Sender to use to send the OpResponse/OpError back to the
 /// originator
 /// stream is a UnixStream OwnedWriteHalf to pass back to the originator (f
 /// provided) so they can send the data out of the socket
@@ -349,7 +493,7 @@ pub struct Operation {
     priority: Priority,
     op_type: OpType,
     created_at: Instant,
-    sender: Arc<Sender<Result<Resp, ProcError>>>,
+    sender: Arc<Sender<OpResponse>>,
     pub stream: Option<OwnedWriteHalf>,
 }
 
@@ -360,7 +504,7 @@ impl Operation {
     pub fn new(
         priority: Priority,
         op_type: OpType,
-        sender: Arc<Sender<Result<Resp, ProcError>>>,
+        sender: Arc<Sender<OpResponse>>,
         stream: Option<OwnedWriteHalf>,
     ) -> Self {
         Self {
@@ -368,6 +512,28 @@ impl Operation {
             op_type,
             created_at: Instant::now(),
             sender,
+            stream,
+        }
+    }
+}
+
+impl From<Operation> for OpResponse {
+    fn from(op: Operation) -> Self {
+        // Convert OpType to OpResponseType using the From impl we made earlier
+        let rsp_type: OpResponseType = op.op_type.into();
+
+        OpResponse {
+            rsp: Ok(rsp_type), // Wrap in Ok since we're creating a default/empty response
+            stream: op.stream, // Pass through the stream
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl OpResponse {
+    pub fn with_error(error: OpError, stream: Option<OwnedWriteHalf>) -> Self {
+        OpResponse {
+            rsp: Err(error),
             stream,
         }
     }
@@ -413,16 +579,26 @@ impl OperationQueues {
         // Define a regular async function instead of a closure
         async fn cleanup_queue(queue: &mut VecDeque<Operation>, max_age: Duration) {
             let now = Instant::now();
-            // Collect operations to be removed for error reporting
-            let aged_out: Vec<_> = queue
-                .iter()
-                .filter(|op| now.duration_since(op.created_at) >= max_age)
-                .collect();
+
+            // Age out operations - this is a bit fiddly as we need mutable ops
+            // in order to take stream
+            let mut aged_out = Vec::new();
+            let mut ii = 0;
+            while ii < queue.len() {
+                if now.duration_since(queue[ii].created_at) >= max_age {
+                    aged_out.push(queue.remove(ii).unwrap());
+                } else {
+                    ii += 1;
+                }
+            }
 
             // Report timeouts for aged-out operations
-            for op in aged_out {
+            for mut op in aged_out {
                 // Create response to send via oneshot
-                let rsp = Err(ProcError::OperationTimeout(max_age));
+                let rsp = OpResponse {
+                    rsp: Err(OpError::OperationTimeout(0)),
+                    stream: op.stream.take(),
+                };
 
                 // Send the response - if send fails it returns back the whole
                 // rsp - but we'll just drop it
@@ -455,6 +631,7 @@ pub struct Proc {
     shutdown: Arc<AtomicBool>,
     cbm: Arc<Mutex<Cbm>>,
     drive_mgr: Arc<Mutex<DriveManager>>,
+    mount_svc: MountService,
 }
 
 impl Proc {
@@ -464,7 +641,9 @@ impl Proc {
         shutdown: Arc<AtomicBool>,
         cbm: Arc<Mutex<Cbm>>,
         drive_mgr: Arc<Mutex<DriveManager>>,
+        mountpoints: Arc<RwLock<HashMap<PathBuf, Arc<RwLock<Mount>>>>>,
     ) -> Self {
+        let mount_svc = MountService::new(cbm.clone(), drive_mgr.clone(), mountpoints);
         Self {
             queues: OperationQueues::new(),
             operation_receiver,
@@ -473,51 +652,44 @@ impl Proc {
             shutdown,
             cbm,
             drive_mgr,
+            mount_svc,
         }
     }
 
-    async fn execute_operation(&self, op: Operation) -> Result<Resp, ProcError> {
+    async fn execute_operation(&self, op_type: OpType) -> Result<OpResponseType, OpError> {
         if self.shutdown.load(Ordering::Relaxed) {
-            return Err(ProcError::OperationCancelled);
+            return Err(OpError::OperationCancelled);
         }
-        let rsp_type = match op.op_type {
+        match op_type {
             OpType::Mount {
                 device,
                 mountpoint,
-                dummy_formats: _,
+                dummy_formats,
                 bus_reset: _,
-            } => {
-                locking_section!("Lock", "Drive Manager", {
-                    let drive_mgr = self.drive_mgr.lock().await;
-                    drive_mgr
-                        .mount_drive(
-                            device,
-                            AsRef::<Path>::as_ref(&mountpoint),
-                            self.drive_mgr.clone(),
-                            self.operation_sender.clone(),
-                        )
-                        .await
-                        .map(|_| RspType::Mount())
-                        .map_err(|e| e.into())
-                })
-            }
-            OpType::Unmount { device, mountpoint } => {
-                locking_section!("Lock", "Drive Manager", {
-                    let drive_mgr = self.drive_mgr.lock().await;
-                    drive_mgr
-                        .unmount_drive(device, mountpoint.as_ref())
-                        .await
-                        .map(|_| RspType::Unmount())
-                        .map_err(|e| e.into())
-                })
-            }
+            } => self
+                .mount_svc
+                .mount(
+                    device,
+                    mountpoint,
+                    dummy_formats,
+                    self.operation_sender.clone(),
+                )
+                .await
+                .map(|_| OpResponseType::Mount())
+                .map_err(|e| e.into()),
+            OpType::Unmount { device, mountpoint } => self
+                .mount_svc
+                .unmount(device, mountpoint, false)
+                .await
+                .map(|_| OpResponseType::Mount())
+                .map_err(|e| e.into()),
             OpType::Identify { device } => {
                 locking_section!("Lock", "Drive Manager", {
                     let drive_mgr = self.drive_mgr.lock().await;
                     drive_mgr
                         .identify_drive(device)
                         .await
-                        .map(|info| RspType::Identify { info })
+                        .map(|info| OpResponseType::Identify { info })
                         .map_err(|e| e.into())
                 })
             }
@@ -527,7 +699,7 @@ impl Proc {
                     drive_mgr
                         .get_drive_status(device)
                         .await
-                        .map(|status| RspType::GetStatus { status })
+                        .map(|status| OpResponseType::GetStatus { status })
                         .map_err(|e| e.into())
                 })
             }
@@ -537,36 +709,32 @@ impl Proc {
                     drive_mgr
                         .reset_bus()
                         .await
-                        .map(|_| RspType::BusReset())
+                        .map(|_| OpResponseType::BusReset())
                         .map_err(|e| e.into())
                 })
             }
-            _ => Err(ProcError::InternalError(format!(
+            _ => Err(OpError::InternalError(format!(
                 "Operation not yet supported {}",
-                op.op_type
+                op_type
             ))),
-        };
-        rsp_type.map(|rsp_type| Resp {
-            rsp_type,
-            stream: op.stream,
-        })
+        }
     }
 
     pub async fn send_resp(
         &self,
-        sender: Arc<Sender<Result<Resp, ProcError>>>,
-        rsp: Result<Resp, ProcError>,
-    ) -> Result<(), ProcError> {
+        sender: Arc<Sender<OpResponse>>,
+        rsp: OpResponse,
+    ) -> Result<(), OpError> {
         debug!("Attempting to send response from background processor");
         let send_result = sender.send(rsp).await;
         match &send_result {
             Ok(_) => debug!("Successfully sent response through channel"),
             Err(e) => error!("Failed to send through channel: {:?}", e),
         }
-        send_result.map_err(|e| ProcError::InternalError(format!("Failed to send response {}", e)))
+        send_result.map_err(|e| OpError::InternalError(format!("Failed to send response {}", e)))
     }
 
-    async fn process_operation(&mut self, op: Operation) -> Result<(), ProcError> {
+    async fn process_operation(&mut self, op: Operation) -> Result<(), OpError> {
         // Set up timeout for the operation
         let timeout = match op.priority {
             Priority::Critical => Duration::from_secs(30),
@@ -577,17 +745,25 @@ impl Proc {
 
         // Process with timeout
         let sender = op.sender.clone();
-        let resp = match tokio::time::timeout(timeout, self.execute_operation(op)).await {
-            Ok(resp) => {
-                trace!("Handled Operation with response {:?}", resp);
-                resp
-            }
-            Err(_) => {
-                debug!("Hit timeout processing background operation {:?}", timeout);
-                Err(ProcError::OperationTimeout(timeout))
-            }
+        let resp =
+            match tokio::time::timeout(timeout, self.execute_operation(op.op_type.clone())).await {
+                Ok(resp) => {
+                    trace!("Handled Operation with response {:?}", resp);
+                    resp
+                }
+                Err(op) => {
+                    debug!(
+                        "Hit timeout processing background operation {:?} {:?}",
+                        op, timeout
+                    );
+                    Err(OpError::OperationTimeout(0))
+                }
+            };
+        let op_response = OpResponse {
+            rsp: resp,
+            stream: op.stream,
         };
-        self.send_resp(sender, resp).await
+        self.send_resp(sender, op_response).await
     }
 
     pub async fn run(&mut self) {
@@ -628,5 +804,6 @@ impl Proc {
         }
 
         info!("Background operation processor exited");
+        self.mount_svc.cleanup().await;
     }
 }

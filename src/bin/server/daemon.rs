@@ -1,6 +1,6 @@
 use rs1541fs::cbm::Cbm;
 
-use crate::bg::{Operation, Proc, ProcError, Resp, MAX_BG_CHANNELS};
+use crate::bg::{OpResponse, Operation, Proc, MAX_BG_CHANNELS};
 use crate::drivemgr::DriveManager;
 use crate::error::DaemonError;
 use crate::ipc::{IpcServer, MAX_BG_RSP_CHANNELS};
@@ -45,8 +45,9 @@ pub struct Daemon {
     // DriveManager object to handle drives
     drive_mgr: Arc<Mutex<DriveManager>>,
 
-    // Mountpoints HashMap.  This is needed by DriveManager to check for
-    // the existence of an existing mount at a mountpoint
+    // Mountpoints HashMap.  This is needed by DriveManager (and hence
+    // MountService as DriveManager's creator) to check for the existence of
+    // an existing mount at a mountpoint
     mountpoints: Arc<RwLock<HashMap<PathBuf, Arc<RwLock<Mount>>>>>,
 
     // Main tokio runtime
@@ -57,8 +58,8 @@ pub struct Daemon {
     bg_proc_rx: Option<Receiver<Operation>>,
 
     // Channels to receive responses from Background Process
-    bg_rsp_tx: Option<Arc<Sender<Result<Resp, ProcError>>>>,
-    bg_rsp_rx: Option<Receiver<Result<Resp, ProcError>>>,
+    bg_rsp_tx: Option<Arc<Sender<OpResponse>>>,
+    bg_rsp_rx: Option<Receiver<OpResponse>>,
 
     // IPC Server
     ipc_server: Option<Arc<Mutex<IpcServer>>>,
@@ -92,7 +93,7 @@ impl Daemon {
         let mountpoints = Arc::new(RwLock::new(HashMap::new()));
 
         // Create DriveManager
-        let drive_mgr = DriveManager::new(cbm.clone(), mountpoints.clone());
+        let drive_mgr = DriveManager::new(cbm.clone());
         let drive_mgr = Arc::new(Mutex::new(drive_mgr));
 
         let daemon = Self {
@@ -131,7 +132,7 @@ impl Daemon {
         self.ipc_server_handle.take().unwrap()
     }
 
-    pub fn create_ipc_server(&mut self) -> Result<Receiver<Result<Resp, ProcError>>, DaemonError> {
+    pub fn create_ipc_server(&mut self) -> Result<Receiver<OpResponse>, DaemonError> {
         // create_ipc_server must only be called once
         assert!(self.ipc_server.is_none());
 
@@ -148,7 +149,7 @@ impl Daemon {
 
     pub async fn start_ipc_server(
         &mut self,
-        bg_rsp_rx: Receiver<Result<Resp, ProcError>>,
+        bg_rsp_rx: Receiver<OpResponse>,
     ) -> Result<(), DaemonError> {
         // Return Result instead of ()
         trace!("Entered: start_ipc_server");
@@ -186,6 +187,7 @@ impl Daemon {
             self.bg_proc_shutdown.clone(),
             self.cbm.clone(),
             self.drive_mgr.clone(),
+            self.mountpoints.clone(),
         ))));
         Ok(())
     }
@@ -252,7 +254,6 @@ impl Daemon {
 
     pub async fn cleanup_drive_mgr(&self) -> () {
         trace!("Entered cleanup_drive_mgr");
-        self.drive_mgr.lock().await.cleanup_mounts().await;
         self.drive_mgr.lock().await.cleanup_drives().await;
     }
 
