@@ -25,7 +25,7 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(test)]
 const STARTUP_TIMEOUT: Duration = Duration::from_millis(100);
 #[cfg(not(test))]
-const OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
+const OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(test)]
 const OPERATION_TIMEOUT: Duration = Duration::from_millis(100);
 const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(1000);
