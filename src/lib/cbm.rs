@@ -1,8 +1,9 @@
 pub use crate::cbmtype::CbmDeviceInfo;
 use crate::cbmtype::{CbmDeviceType, CbmError, CbmErrorNumber, CbmErrorNumberOk, CbmStatus};
 use crate::opencbm::{ascii_to_petscii, OpenCbm};
+use crate::{parse_lsusb_output, parse_usbreset_output, run_command};
 
-use log::{debug, info};
+use log::{debug, info, trace, warn};
 use parking_lot::Mutex;
 
 use std::collections::HashMap;
@@ -10,12 +11,14 @@ use std::fmt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::thread::sleep;
+use std::time::Duration;
 
 /// Cbm is the object used by applications to access OpenCBM functionality.
 /// It wraps the libopencbm function calls with a rusty level of abstraction.
 #[derive(Debug, Clone)]
 pub struct Cbm {
-    handle: Arc<Mutex<OpenCbm>>,
+    handle: Arc<Mutex<Option<OpenCbm>>>,
 }
 
 impl Cbm {
@@ -33,44 +36,118 @@ impl Cbm {
         })?;
         debug!("Successfully opened and reset Cbm");
         Ok(Self {
-            handle: Arc::new(Mutex::new(cbm)),
+            handle: Arc::new(Mutex::new(Some(cbm))),
         })
+    }
+
+    /// It is recommended to use this function sparingly.  It
+    /// * drops the OpenCBM handle (hence causing cbm_driver_close to be
+    ///   called)
+    /// * pauses to allow that to complete
+    /// * find what bus/device the xum1541 is on, using lsusb
+    /// * performs a USB device reset using usbreset (ubuntu package usbutils)
+    /// * creates a new OpenCBM handle (causing cbm_driver_open to be called)
+    ///   and resets the bus.
+    ///
+    /// If running within tokio use tokio::task::spawn_blocking and run this
+    /// within that.
+    pub fn blocking_usb_reset(&mut self) -> Result<(), CbmError> {
+        warn!("Performing USB level reset of xum1541 device");
+
+        const CBM_DROP_SLEEP_DURATION: Duration = Duration::from_millis(500);
+
+        // cbm.lock() section
+        {
+            trace!("Lock and drop cbm.handle");
+            let mut cbm_handle_guard = self.handle.lock();
+            let handle = cbm_handle_guard.take();
+            drop(handle);
+            sleep(CBM_DROP_SLEEP_DURATION);
+
+            // Run lsusb
+            trace!("Run lsusb");
+            let lsusb_output = run_command("lsusb").map_err(|e| {
+                CbmError::UsbError(format!("Failed to run lsusb: {}", e.to_string()))
+            })?;
+
+            // Find the XUM1541's bus ID and device ID
+            trace!("Parse lsusb output: {}", lsusb_output);
+            let (bus, device) = match parse_lsusb_output(&lsusb_output, "xum1541") {
+                Some(x) => x,
+                None => {
+                    return Err(CbmError::UsbError(format!(
+                        "Failed to parse lsusb output: {}",
+                        lsusb_output
+                    )))
+                }
+            };
+            trace!("xum1541 USB details: bus {} device {}", bus, device);
+
+            trace!("Run usbreset {}/{}", bus, device);
+            let usbreset_output = run_command(format!("usbreset {}/{}", bus, device).as_ref())
+                .map_err(|e| {
+                    CbmError::UsbError(format!("Failed to run usbreset {}/{}: {}", bus, device, e))
+                })?;
+
+            trace!("Parse usbreset output: {}", usbreset_output);
+            if !parse_usbreset_output(&usbreset_output, "xum1541", "ok") {
+                return Err(CbmError::UsbError(format!(
+                    "Failed to reset xum1541: {}",
+                    usbreset_output
+                )));
+            }
+
+            // Now recreate the OpenCBM handle
+            let new_cbm = Cbm::new()?;
+            let new_handle = new_cbm.handle.lock().take();
+            *cbm_handle_guard = new_handle;
+        }
+        Ok(())
     }
 
     /// Reset the entire bus
     pub fn reset_bus(&self) -> Result<(), CbmError> {
-        let cbm_guard = self.handle.lock();
-        cbm_guard.reset().map_err(|e| CbmError::DeviceError {
-            device: 0,
-            message: e.to_string(),
-        })?;
-        Ok(())
+        self.handle
+            .lock()
+            .as_ref() // Convert Option<OpenCbm> to Option<&OpenCbm>
+            .ok_or(CbmError::UsbError(
+                // Convert None to Err
+                "No CBM handle".to_string(),
+            ))? // Propagate error if None
+            .reset() // Call reset() on the OpenCbm
+            .map_err(|e| CbmError::DeviceError {
+                device: 0,
+                message: e.to_string(),
+            }) // Convert the reset error if it occurs
     }
 
     pub fn identify(&self, device: u8) -> Result<CbmDeviceInfo, CbmError> {
-        let cbm_guard = self.handle.lock();
-        let device_info = cbm_guard
+        self.handle
+            .lock()
+            .as_ref()
+            .ok_or(CbmError::UsbError(
+                "No CBM handle".to_string(),
+            ))?
             .identify(device)
             .map_err(|e| CbmError::DeviceError {
                 device,
                 message: e.to_string(),
-            })?;
-        Ok(device_info)
+            })
     }
 
     pub fn get_status(&self, device: u8) -> Result<CbmStatus, CbmError> {
-        let cbm_guard = self.handle.lock();
-
-        // Try and capture 256 bytes.  We won't get that many - cbmctrl only
-        // passes a 40 char buf in.  However, I suspect some drives may
-        // return multi line statuses.
-        let (buf, result) =
-            cbm_guard
-                .device_status(device, 256)
-                .map_err(|e| CbmError::DeviceError {
-                    device,
-                    message: e.to_string(),
-                })?;
+        let (buf, result) = self
+            .handle
+            .lock()
+            .as_ref()
+            .ok_or(CbmError::UsbError(
+                "No CBM handle".to_string(),
+            ))?
+            .device_status(device, 256)
+            .map_err(|e| CbmError::DeviceError {
+                device,
+                message: e.to_string(),
+            })?;
 
         if result < 0 {
             return Err(CbmError::DeviceError {
@@ -79,36 +156,34 @@ impl Cbm {
             });
         }
 
-        let status = String::from_utf8_lossy(&buf);
+        let status = String::from_utf8_lossy(&buf)
+            .split("\r")
+            .next()
+            .unwrap_or(&String::from_utf8_lossy(&buf))
+            .trim()
+            .to_string();
 
-        // The returned string may have \r in it.  If so get rid of that and
-        // anything remaing.
-        let processed = if let Some(main_status) = status.split("\r").next() {
-            main_status.to_string()
-        } else {
-            status.to_string()
-        };
-
-        CbmStatus::new(processed.trim(), device).map(|s| Ok(s))?
+        CbmStatus::new(&status, device)
     }
 
-    /// Send a command to the specified device on channel 15
     pub fn send_command(&self, device: u8, command: &str) -> Result<(), CbmError> {
-        let cbm_guard = self.handle.lock();
+        let guard = self.handle.lock();
+        let cbm = guard.as_ref()
+            .ok_or(CbmError::UsbError(
+                "No CBM handle".to_string(),
+            ))?;
 
         debug!("Send command: {}", command);
 
         // Allocate channel 15 for commands
-        cbm_guard
-            .listen(device, 15)
-            .map_err(|e| CbmError::CommandError {
-                device,
-                message: format!("Listen failed: {}", e),
-            })?;
+        cbm.listen(device, 15).map_err(|e| CbmError::CommandError {
+            device,
+            message: format!("Listen failed: {}", e),
+        })?;
 
         // Convert command to PETSCII and send
         let cmd_bytes = ascii_to_petscii(command);
-        let result = cbm_guard
+        let result = cbm
             .raw_write(&cmd_bytes)
             .map_err(|e| CbmError::CommandError {
                 device,
@@ -123,7 +198,7 @@ impl Cbm {
         }
 
         // Cleanup
-        cbm_guard.unlisten().map_err(|e| CbmError::CommandError {
+        cbm.unlisten().map_err(|e| CbmError::CommandError {
             device,
             message: format!("Unlisten failed: {}", e),
         })?;
@@ -151,7 +226,11 @@ impl Cbm {
 
     /// Read file from disk
     pub fn read_file(&self, device: u8, filename: &str) -> Result<Vec<u8>, CbmError> {
-        let cbm_guard = self.handle.lock();
+        let guard = self.handle.lock();
+        let _cbm = guard.as_ref()
+        .ok_or(CbmError::UsbError(
+            "No CBM handle".to_string(),
+        ))?;
         let mut data = Vec::new();
 
         // Find a free channel (0-14)
@@ -159,6 +238,7 @@ impl Cbm {
         let channel = 2; // For demonstration
 
         // Open file for reading
+        drop(guard); // Drop guard temporarily for send_command
         self.send_command(device, &format!("{}", filename))?;
 
         // Check status after open
@@ -167,16 +247,21 @@ impl Cbm {
             return Err(status.into());
         }
 
+        // Re-acquire guard for file operations
+        let guard = self.handle.lock();
+        let cbm = guard.as_ref().ok_or(CbmError::FileError {
+            device,
+            message: "No CBM handle".to_string(),
+        })?;
+
         // Now read the file data
-        cbm_guard
-            .talk(device, channel)
-            .map_err(|e| CbmError::FileError {
-                device,
-                message: format!("Talk failed: {}", e),
-            })?;
+        cbm.talk(device, channel).map_err(|e| CbmError::FileError {
+            device,
+            message: format!("Talk failed: {}", e),
+        })?;
 
         loop {
-            let (buf, count) = cbm_guard.raw_read(256).map_err(|e| CbmError::FileError {
+            let (buf, count) = cbm.raw_read(256).map_err(|e| CbmError::FileError {
                 device,
                 message: format!("Read failed: {}", e),
             })?;
@@ -189,7 +274,7 @@ impl Cbm {
         }
 
         // Cleanup
-        cbm_guard.untalk().map_err(|e| CbmError::FileError {
+        cbm.untalk().map_err(|e| CbmError::FileError {
             device,
             message: format!("Untalk failed: {}", e),
         })?;
@@ -199,11 +284,18 @@ impl Cbm {
 
     /// Write file to disk
     pub fn write_file(&self, device: u8, filename: &str, data: &[u8]) -> Result<(), CbmError> {
-        let cbm_guard = self.handle.lock();
+        let guard = self.handle.lock();
+        let _cbm = guard.as_ref()
+        .ok_or(CbmError::UsbError(
+            "No CBM handle".to_string(),
+        ))?;
 
         // Find a free channel (0-14)
         // In a real implementation, we'd use the CbmChannelManager here
         let channel = 2; // For demonstration
+
+        // Drop guard for nested operations that need the mutex
+        drop(guard);
 
         // Open file for writing with overwrite if exists
         self.send_command(device, &format!("@:{}", filename))?;
@@ -214,9 +306,15 @@ impl Cbm {
             return Err(status.into());
         }
 
+        // Reacquire guard for file operations
+        let guard = self.handle.lock();
+        let cbm = guard.as_ref().ok_or(CbmError::FileError {
+            device,
+            message: "No CBM handle".to_string(),
+        })?;
+
         // Now write the file data
-        cbm_guard
-            .listen(device, channel)
+        cbm.listen(device, channel)
             .map_err(|e| CbmError::FileError {
                 device,
                 message: format!("Listen failed: {}", e),
@@ -224,12 +322,10 @@ impl Cbm {
 
         // Write data in chunks
         for chunk in data.chunks(256) {
-            let result = cbm_guard
-                .raw_write(chunk)
-                .map_err(|e| CbmError::FileError {
-                    device,
-                    message: format!("Write failed: {}", e),
-                })?;
+            let result = cbm.raw_write(chunk).map_err(|e| CbmError::FileError {
+                device,
+                message: format!("Write failed: {}", e),
+            })?;
 
             if result != chunk.len() as i32 {
                 return Err(CbmError::FileError {
@@ -240,14 +336,13 @@ impl Cbm {
         }
 
         // Cleanup
-        cbm_guard.unlisten().map_err(|e| CbmError::FileError {
+        cbm.unlisten().map_err(|e| CbmError::FileError {
             device,
             message: format!("Unlisten failed: {}", e),
         })?;
 
         Ok(())
     }
-
     /// Delete a file from disk
     pub fn delete_file(&self, device: u8, filename: &str) -> Result<(), CbmError> {
         // Construct scratch command (S:filename)
@@ -471,7 +566,7 @@ impl CbmDriveUnit {
         self.busy = true;
 
         // First ? catches panic and maps to CbmError
-        // Second > propogates CbmError (from first, or from within {})
+        // Second > propagates CbmError (from first, or from within {})
         let mut status_vec: Vec<CbmStatus> = Vec::new();
         catch_unwind(AssertUnwindSafe(|| {
             self.num_disk_drives_iter().try_for_each(|ii| {

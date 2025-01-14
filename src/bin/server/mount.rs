@@ -85,6 +85,8 @@ impl From<CbmError> for MountError {
             CbmError::ValidationError(message) => {
                 MountError::CbmError(format!("Validation error: {}", message))
             }
+
+            CbmError::UsbError(message) => MountError::CbmError(message),
         }
     }
 }
@@ -355,8 +357,10 @@ impl Mount {
         let mount_clone = mount.clone();
         locking_section!("Lock", "Mount", {
             let mut mount_clone = mount_clone.write().await;
-            mount_clone.create_fuser().await
-            .inspect_err(|e| debug!("Failed to create fuser thread for mount {}", e))?;
+            mount_clone
+                .create_fuser()
+                .await
+                .inspect_err(|e| debug!("Failed to create fuser thread for mount {}", e))?;
         });
 
         // TO DO

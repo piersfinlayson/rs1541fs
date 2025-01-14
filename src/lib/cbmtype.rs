@@ -1,6 +1,6 @@
 use crate::opencbm::OpenCbmError;
 
-use libc::{EBUSY, EINVAL, EIO, ENOENT, ENOTSUP, EPERM};
+use libc::{EBUSY, EINVAL, EIO, ENOENT, ENOTSUP, ENXIO, EPERM};
 use log::{debug, info, trace, warn};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
@@ -9,19 +9,39 @@ use std::fmt;
 #[derive(Debug, PartialEq)]
 pub enum CbmError {
     /// Device not responding or connection issues
-    DeviceError { device: u8, message: String },
+    DeviceError {
+        device: u8,
+        message: String,
+    },
     /// Channel allocation failed
-    ChannelError { device: u8, message: String },
+    ChannelError {
+        device: u8,
+        message: String,
+    },
     /// File operation failed (read/write/open/close)
-    FileError { device: u8, message: String },
+    FileError {
+        device: u8,
+        message: String,
+    },
     /// Command execution failed
-    CommandError { device: u8, message: String },
+    CommandError {
+        device: u8,
+        message: String,
+    },
     /// Drive returned error status
-    StatusError { device: u8, status: CbmStatus },
+    StatusError {
+        device: u8,
+        status: CbmStatus,
+    },
     /// Timeout during operation
-    TimeoutError { device: u8 },
+    TimeoutError {
+        device: u8,
+    },
     /// Invalid parameters or state
-    InvalidOperation { device: u8, message: String },
+    InvalidOperation {
+        device: u8,
+        message: String,
+    },
     /// OpenCBM specific errors
     OpenCbmError {
         device: Option<u8>, // Some operations might not be device-specific
@@ -31,6 +51,7 @@ pub enum CbmError {
     FuseError(i32), // No device number as this is filesystem level
     /// Used when validation fails
     ValidationError(String),
+    UsbError(String),
 }
 
 impl std::error::Error for CbmError {
@@ -89,6 +110,7 @@ impl CbmError {
             CbmError::FuseError(errno) => *errno,
             CbmError::ValidationError { .. } => EINVAL,
             CbmError::StatusError { .. } => EPERM,
+            CbmError::UsbError(_msg) => ENXIO,
         }
     }
 
@@ -180,6 +202,9 @@ impl fmt::Display for CbmError {
                     Self::format_device(Some(*device)),
                     status.to_string()
                 )
+            }
+            CbmError::UsbError(msg) => {
+                write!(f, "USB error: {}", msg.to_string())
             }
         }
     }

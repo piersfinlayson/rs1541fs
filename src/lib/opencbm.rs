@@ -322,7 +322,9 @@ impl OpenCbm {
     pub fn device_status(&self, device: u8, size: usize) -> OpenCbmResult<(Vec<u8>, i32)> {
         let handle = self.handle;
         let mut buf = Vec::with_capacity(size);
-        unsafe { buf.set_len(size); }
+        unsafe {
+            buf.set_len(size);
+        }
 
         opencbm_thread_timeout!({
             let result = unsafe {

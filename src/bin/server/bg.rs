@@ -469,6 +469,7 @@ impl From<CbmError> for OpError {
             CbmError::FuseError(errno) => OpError::HardwareError(format!("FUSE error: {}", errno)),
 
             CbmError::ValidationError(msg) => OpError::ValidationError(msg),
+            CbmError::UsbError(msg) => OpError::HardwareError(msg),
         }
     }
 }
