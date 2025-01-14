@@ -591,9 +591,8 @@ impl Proc {
     }
 
     pub async fn run(&mut self) {
-    
         info!("Background operation processor ready");
-    
+
         while !self.shutdown.load(Ordering::Relaxed) {
             tokio::select! {
                 // Periodic cleanup check
@@ -601,14 +600,14 @@ impl Proc {
                     self.queues.cleanup(MAX_OPERATION_AGE).await;
                     self.last_cleanup = Instant::now();
                 }
-    
+
                 // Process operations
                 _ = async {
                     // Check for new operations until we run out
                     while let Ok(op) = self.operation_receiver.try_recv() {
                         self.queues.push(op);
                     }
-    
+
                     // Process next operation if available
                     if let Some(op) = self.queues.pop_next() {
                         match self.process_operation(op).await {
@@ -619,7 +618,7 @@ impl Proc {
                 } => {}
             }
         }
-    
+
         info!("Background operation processor exited");
     }
 }

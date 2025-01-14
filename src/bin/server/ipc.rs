@@ -250,20 +250,18 @@ impl IpcServer {
     }
 
     async fn cleanup_socket(&self) {
-        debug!("Entered cleanup_socket");
-        self.ipc_server_run.store(false, Ordering::SeqCst);
         Self::remove_socket_if_exists().await;
     }
 
     async fn start_ipc_listener(&self) -> Result<JoinHandle<()>, DaemonError> {
         self.ipc_server_run.store(true, Ordering::SeqCst);
         let listener = self.setup_socket().await?;
-    
+
         info!("IPC server ready to accept connections on {}", SOCKET_PATH);
-    
+
         // Create a clone of self for the spawned task
         let self_clone = self.clone();
-    
+
         // Spawn the listener loop in its own task
         let handle = tokio::spawn(async move {
             debug!("IPC listener ready");
@@ -301,11 +299,11 @@ impl IpcServer {
                     }
                 }
             }
-    
+
             info!("IPC server exited");
             self_clone.cleanup_socket().await;
         });
-    
+
         Ok(handle)
     }
 
@@ -330,12 +328,12 @@ impl IpcServer {
     ) -> Result<JoinHandle<()>, DaemonError> {
         trace!("Entered start_background_receiver");
         let mut rx = bg_rsp_rx;
-    
+
         info!(
             "Starting bg receiver with channel capacity: {}",
             rx.capacity()
         );
-    
+
         let bg_listener_run = self.bg_listener_run.clone();
         bg_listener_run.store(true, Ordering::SeqCst);
         let handle = tokio::spawn(async move {
@@ -383,7 +381,7 @@ impl IpcServer {
             }
             info!("IPC background response processor exited");
         });
-    
+
         trace!("Exiting start_background_receiver");
         Ok(handle)
     }

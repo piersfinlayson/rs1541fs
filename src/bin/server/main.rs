@@ -17,15 +17,18 @@ use rs1541fs::logging::init_logging;
 use daemonize::Daemonize;
 use log::{debug, error, info, trace, warn};
 use nix::unistd::getpid;
-use scopeguard::defer;
 use signal::SignalHandler;
 use std::fs;
 use std::panic;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::Mutex;
 
+const NUM_WORKER_THREADS: usize = 8;
+
+/// Macro to wrap lock(), read() and write() sections of code using Mutex
+/// and RwLock
+///
 /// Example usage:
 /// locking_section!("Write", "config", {
 ///     let mut lock = config.write().await;
@@ -109,36 +112,7 @@ fn check_pid_file() -> Result<(), DaemonError> {
 // - Background listenere
 // - Fuse thread
 // Remainder are spares
-#[tokio::main(flavor = "multi_thread", worker_threads = 8)]
-async fn main() -> Result<(), DaemonError> {
-    // Don't initialize logger yet, as we don't seem to be able to re-init
-    // later (with a new PID) without a panic
-    // init_logging(true, env!("CARGO_BIN_NAME").into());
-    // debug!("Logging initialized");
-
-    let args = Args::new();
-
-    if !args.foreground {
-        // Daemonize - must do so before setting up our signal
-        // handler.
-        check_pid_file()?;
-        let daemonize = Daemonize::new()
-            .pid_file(get_pid_filename())
-            .chown_pid_file(true)
-            .working_directory("/tmp");
-
-        match daemonize.start() {
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("Failed to dameonize, {}", e);
-                return Err(DaemonError::InternalError(format!(
-                    "Failed to daemonize {}",
-                    e
-                )));
-            }
-        }
-    }
-
+async fn async_main(args: &Args) -> Result<(), DaemonError> {
     // We do this after daemonizing so the PID used in syslog is the PID of
     // the daemon process, not the parent process that called daemonize()
     let pid = getpid();
@@ -146,22 +120,6 @@ async fn main() -> Result<(), DaemonError> {
     info!("----- Starting -----");
     if !args.foreground {
         info!("Daemonized at pid {}", pid);
-    }
-
-    panic::set_hook(Box::new(|panic_info| {
-        if let Some(location) = panic_info.location() {
-            error!("Panic occurred at {}:{}", location.file(), location.line());
-        }
-        error!("Panic info: {}", panic_info);
-    }));
-
-    // Set up deferred cleanup
-    defer! {
-        if Path::new(&get_pid_filename()).exists() {
-            info!("Removing pidfile");
-            let _ = fs::remove_file(get_pid_filename());
-        }
-        info!("----- Exiting -----");
     }
 
     // Connect to OpenCBM and open the XUM1541 device - we do this early on
@@ -216,16 +174,6 @@ async fn main() -> Result<(), DaemonError> {
         shared_daemon.lock().await.take_bg_listener_handle()
     });
 
-    // Create new abort handles for the tasks - this allows us to join to them
-    // in our signal handling code, while using the join handles (above) in
-    // tokio::select!.
-    let bg_proc_abort = bg_proc_handle.abort_handle();
-    let bg_proc_abort2 = bg_proc_handle.abort_handle();
-    let ipc_server_abort = ipc_server_handle.abort_handle();
-    let ipc_server_abort2 = ipc_server_handle.abort_handle();
-    let bg_listener_abort = bg_listener_handle.abort_handle();
-    let bg_listener_abort2 = bg_listener_handle.abort_handle();
-
     // Set up signal handler - it runs in the select below
     let signal_handler = SignalHandler::new();
 
@@ -253,45 +201,7 @@ async fn main() -> Result<(), DaemonError> {
             }
         }
         _ = signal_handler.handle_signals() => {
-            info!("Starting shutdown sequence");
-
-            // Clone the arc/mutex if needed for the shared daemon
-            let shared_daemon = shared_daemon.clone();
-
-            let cleanup = async move {
-                // Initiate shutdown - need to await on stop_ipc_all() as it's
-                // async
-                shared_daemon.lock().await.stop_bg_proc(false);
-                shared_daemon.lock().await.stop_ipc_all(false).await;
-                shared_daemon.lock().await.cleanup_drive_mgr().await;
-                while !bg_proc_abort2.is_finished() ||
-                    !ipc_server_abort2.is_finished() ||
-                    !bg_listener_abort2.is_finished() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }};
-
-            match tokio::time::timeout(Duration::from_secs(5), cleanup).await {
-                Ok(_) => {
-                    info!("Cleanup completed");
-                    assert!(bg_proc_abort.is_finished());
-                    assert!(ipc_server_abort.is_finished());
-                    assert!(bg_listener_abort.is_finished());
-                },
-                Err(_) => {
-                    error!("Cleanup timed out - forcing exit");
-                    // Abort any remaining tasks
-                    if !bg_proc_abort.is_finished() {
-                        bg_proc_abort.abort();
-                    }
-                    if !ipc_server_abort.is_finished() {
-                        ipc_server_abort.abort();
-                    }
-                    if !bg_listener_abort.is_finished() {
-                        bg_listener_abort.abort();
-                    }
-                    std::process::exit(1);
-                }
-            }
+            shared_daemon.lock().await.shutdown().await?
         }
     }
 
@@ -299,4 +209,68 @@ async fn main() -> Result<(), DaemonError> {
     // Note that the deferred code will now run, as well as Rust dropping
     // anything we didn't explicitly drop already
     Ok(())
+}
+
+// Will get called when async_main exits
+struct MainCleanupGuard;
+impl Drop for MainCleanupGuard {
+    fn drop(&mut self) {
+        debug!("Cleaning up...");
+        if Path::new(&get_pid_filename()).exists() {
+            info!("Removing pidfile");
+            let _ = fs::remove_file(get_pid_filename());
+        }
+        info!("----- Exiting -----");
+    }
+}
+
+fn main() -> Result<(), DaemonError> {
+    // Set up a cleanup guard to run when this function exits
+    let _guard = MainCleanupGuard;
+
+    // Set a panic hook
+    panic::set_hook(Box::new(|panic_info| {
+        if let Some(location) = panic_info.location() {
+            error!("Panic occurred at {}:{}", location.file(), location.line());
+        }
+        error!("Panic info: {}", panic_info);
+    }));
+
+    // Don't initialize logger yet, as we don't seem to be able to re-init
+    // later (with a new PID) without a panic
+
+    // We have the get our args first - to figure out if we need to
+    // daaemonize
+    let args = Args::new();
+
+    if !args.foreground {
+        // Daemonize - must do so before setting up our signal
+        // handler.
+        check_pid_file()?;
+        let daemonize = Daemonize::new()
+            .pid_file(get_pid_filename())
+            .chown_pid_file(true)
+            .working_directory("/tmp");
+
+        match daemonize.start() {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("Failed to dameonize, {}", e);
+                return Err(DaemonError::InternalError(format!(
+                    "Failed to daemonize {}",
+                    e
+                )));
+            }
+        }
+    }
+
+    // Start the tokio runtime
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(NUM_WORKER_THREADS)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    // Do everything else in async_main
+    runtime.block_on(async_main(args))
 }

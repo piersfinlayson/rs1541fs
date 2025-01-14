@@ -7,16 +7,21 @@ use crate::ipc::{IpcServer, MAX_BG_RSP_CHANNELS};
 use crate::locking_section;
 use crate::mount::Mount;
 
-use log::{debug, info, trace, warn};
+use log::{debug, error, info, trace, warn};
 use nix::unistd::Pid;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::{Mutex, RwLock};
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle};
+use tokio::time::{sleep, timeout};
+
+pub const CLEANUP_LOOP_TIMER: Duration = Duration::from_millis(10);
+pub const CLEANUP_OVERALL_TIMER: Duration = Duration::from_secs(5);
 
 /// Main 1541fsd data structure, storing:
 /// * libopencbm handle
@@ -68,6 +73,11 @@ pub struct Daemon {
 
     // Flag to shutdown Background Processor,
     bg_proc_shutdown: Arc<AtomicBool>,
+
+    // Abort handles - used to check threads have exited
+    bg_proc_abort: Option<AbortHandle>,
+    ipc_server_abort: Option<AbortHandle>,
+    bg_listener_abort: Option<AbortHandle>,
 }
 
 impl Daemon {
@@ -101,6 +111,9 @@ impl Daemon {
             bg_proc_handle: None,
             bg_proc_shutdown,
             bg_listener_handle: None,
+            bg_proc_abort: None,
+            ipc_server_abort: None,
+            bg_listener_abort: None,
         };
 
         Ok(daemon)
@@ -147,9 +160,11 @@ impl Daemon {
         locking_section!("Lock", "IPC Server", {
             let mut guard = ipc_server.lock().await;
             trace!("Calling main IPC server start routine");
-            let (bg_handle, ipc_handle) = guard.start(bg_rsp_rx).await?; // Actually wait for start() to complete
-            self.bg_listener_handle = Some(bg_handle);
-            self.ipc_server_handle = Some(ipc_handle);
+            let (bg_listener_handle, ipc_server_handle) = guard.start(bg_rsp_rx).await?; // Actually wait for start() to complete
+            self.bg_listener_abort = Some(bg_listener_handle.abort_handle());
+            self.ipc_server_abort = Some(ipc_server_handle.abort_handle());
+            self.bg_listener_handle = Some(bg_listener_handle);
+            self.ipc_server_handle = Some(ipc_server_handle);
             trace!("Main IPC server start routine returned");
         });
 
@@ -181,13 +196,14 @@ impl Daemon {
 
         // Get a clone of bg_proc to pass into the thread
         let bg_proc = self.bg_proc.clone().unwrap();
-        self.bg_proc_handle = Some(tokio::spawn(async move {
+        let bg_proc_handle = tokio::spawn(async move {
             locking_section!("Lock", "BG Processor", {
                 let mut bg_proc = bg_proc.lock().await;
                 bg_proc.run().await;
-                info!("Background processor exited");
             });
-        }));
+        });
+        self.bg_proc_abort = Some(bg_proc_handle.abort_handle());
+        self.bg_proc_handle = Some(bg_proc_handle);
     }
 
     pub fn stop_bg_proc(&mut self, hard: bool) -> () {
@@ -238,5 +254,76 @@ impl Daemon {
         trace!("Entered cleanup_drive_mgr");
         self.drive_mgr.lock().await.cleanup_mounts().await;
         self.drive_mgr.lock().await.cleanup_drives().await;
+    }
+
+    pub async fn shutdown(&mut self) -> Result<(), DaemonError> {
+        info!("Starting shutdown sequence");
+
+        // Get clones of abort handles to move into cleanup closure, and to
+        // use after we move self to the cleanup closure
+        let bg_proc_abort = self.bg_proc_abort.clone();
+        let ipc_server_abort = self.ipc_server_abort.clone();
+        let bg_listener_abort = self.bg_listener_abort.clone();
+        let bg_proc_abort2 = self.bg_proc_abort.clone();
+        let ipc_server_abort2 = self.ipc_server_abort.clone();
+        let bg_listener_abort2 = self.bg_listener_abort.clone();
+
+        let cleanup = async move {
+            // Stop all the threads we started
+            self.stop_bg_proc(false);
+            self.stop_ipc_all(false).await;
+
+            // Cleanup Drive Manager (which cleans up Drives and Mounts)
+            self.cleanup_drive_mgr().await;
+
+            // Now wait until all of the abort handles signal the threads are
+            // finished.  If an abort handle is None (due to some startup/
+            // shutdown race codition) treat that thread as exited (which it
+            // has.
+            while bg_proc_abort.as_ref().map_or(false, |x| !x.is_finished())
+                || ipc_server_abort
+                    .as_ref()
+                    .map_or(false, |x| !x.is_finished())
+                || bg_listener_abort
+                    .as_ref()
+                    .map_or(false, |x| !x.is_finished())
+            {
+                sleep(CLEANUP_LOOP_TIMER).await;
+            }
+        };
+
+        match timeout(CLEANUP_OVERALL_TIMER, cleanup).await {
+            Ok(_) => {
+                info!("All threads shutdown");
+                assert!(bg_proc_abort2.as_ref().map_or(true, |x| x.is_finished()));
+                assert!(ipc_server_abort2.as_ref().map_or(true, |x| x.is_finished()));
+                assert!(bg_listener_abort2
+                    .as_ref()
+                    .map_or(true, |x| x.is_finished()));
+                Ok(())
+            }
+            Err(_) => {
+                error!("Cleanup timed out - forcing exit");
+                // Abort any remaining tasks
+                if let Some(abort) = bg_proc_abort2 {
+                    if !abort.is_finished() {
+                        abort.abort();
+                    }
+                }
+                if let Some(abort) = ipc_server_abort2 {
+                    if !abort.is_finished() {
+                        abort.abort();
+                    }
+                }
+                if let Some(abort) = bg_listener_abort2 {
+                    if !abort.is_finished() {
+                        abort.abort();
+                    }
+                }
+                Err(DaemonError::InternalError(format!(
+                    "Timed out trying to clean up"
+                )))
+            }
+        }
     }
 }

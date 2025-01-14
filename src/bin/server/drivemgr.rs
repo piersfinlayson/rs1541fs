@@ -559,7 +559,7 @@ impl DriveManager {
 
     pub async fn cleanup_mounts(&self) {
         trace!("Starting cleanup of all mounts");
-        
+
         // Get a list of all mountpoints to clean up
         let mountpoints: Vec<PathBuf> = locking_section!("Lock", "Mountpoints", {
             let mps = self.mountpoints.read().await;
@@ -569,8 +569,15 @@ impl DriveManager {
         // Clean up each mount individually
         for mountpoint in mountpoints {
             match self.unmount_drive(None, Some(&mountpoint)).await {
-                Ok(_) => info!("Successfully cleaned up mount at {}", mountpoint.to_string_lossy()),
-                Err(e) => warn!("Failed to clean up mount at {}: {}", mountpoint.to_string_lossy(), e),
+                Ok(_) => info!(
+                    "Successfully cleaned up mount at {}",
+                    mountpoint.to_string_lossy()
+                ),
+                Err(e) => warn!(
+                    "Failed to clean up mount at {}: {}",
+                    mountpoint.to_string_lossy(),
+                    e
+                ),
             }
         }
 
@@ -578,7 +585,10 @@ impl DriveManager {
         locking_section!("Lock", "Mountpoints", {
             let mps = self.mountpoints.read().await;
             if !mps.is_empty() {
-                warn!("Some mountpoints remained after cleanup: {} mountpoints", mps.len());
+                warn!(
+                    "Some mountpoints remained after cleanup: {} mountpoints",
+                    mps.len()
+                );
             } else {
                 debug!("All mountpoints successfully cleaned up");
             }
@@ -587,7 +597,7 @@ impl DriveManager {
 
     pub async fn cleanup_drives(&self) {
         trace!("Starting cleanup of all drives");
-        
+
         // Get a list of all drives to clean up
         let drive_numbers: Vec<u8> = locking_section!("Read", "Drives", {
             let drives = self.drives.read().await;
@@ -613,7 +623,10 @@ impl DriveManager {
         locking_section!("Read", "Drives", {
             let drives = self.drives.read().await;
             if !drives.is_empty() {
-                warn!("Some drives remained after cleanup: {} drives", drives.len());
+                warn!(
+                    "Some drives remained after cleanup: {} drives",
+                    drives.len()
+                );
             } else {
                 debug!("All drives successfully cleaned up");
             }
