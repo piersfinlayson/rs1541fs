@@ -153,6 +153,14 @@ Then reattach your USB device (XUM1541) and try ```cbmctrl detect" again.  Until
 
 You can use WSL (WSL2 to be precise) run rs1541fs.  You must use usbipd in order to connect your XUM1541 USB device to the WSL kernel.  I've found that this stops working after a while, and the wsl instance must be shutdown and restarted in order to get it working again.
 
+### XUM1541
+
+To see logs from XUM1541 add this to the front of the command you run the daemon with:
+
+```
+XUM1541_DEBUG=10
+```
+
 ### libusb1.0
 
 While OpenCBM and the XUM1541 code supports both libusb0.1 and 1.0 I strongly recommend you use 1.0 - the apt install command earlier in this file installs the correct libusb1.0 packages.
