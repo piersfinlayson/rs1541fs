@@ -11,7 +11,7 @@ Before building rs1541fs for the first time you must install the build dependenc
 rs1541fs relies on OpenCBM.  You must build and install OpenCBM.  I've made a few mods to OpenCBM to make it work more reliably so I suggest you use my form.  You can build and isntall it like this:
 
 ```
-sudo apt-get install build-essential libusb-1.0-0-dev cc65 linux-headers-$(uname -r)
+sudo apt-get install build-essential libusb-1.0-0-dev usbutils cc65 linux-headers-$(uname -r)
 git clone https://github.com/piersfinlayson/OpenCBM
 cd OpemCBM
 make -f LINUX/Makefile plugin
@@ -159,6 +159,12 @@ To see logs from XUM1541 add this to the front of the command you run the daemon
 
 ```
 XUM1541_DEBUG=10
+```
+
+The XUM1541 sometimes gets into a bad state.  You can kill 1541fsd and then run ```usbreset``` to reset the device.  Run it without arguments to see what deivce number you need.  For example:
+
+```
+usbreset 001/011
 ```
 
 ### libusb1.0
