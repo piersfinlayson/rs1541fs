@@ -615,6 +615,14 @@ impl Proc {
                             Err(e) => warn!("Background operation failed {}", e),
                         }
                     }
+                    // This sleep is _crucial_ as we are using try_recv() not
+                    // recv().  Otherwise this would be a tight loop and tokio
+                    // might never get the opportunity to process the send()
+                    // call (in send_resp()) and actually send the message
+                    // back.  (Once 4-5 messages are backed up it tends to
+                    // schedule them.)  With this 10ms timer everything else on
+                    // this thread has enough time!
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                 } => {}
             }
         }
