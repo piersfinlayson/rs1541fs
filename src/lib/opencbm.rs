@@ -34,7 +34,7 @@ use std::thread;
 use std::time::Duration;
 
 // How long to allow an FFI call into libopencbm to take before giving up
-const FFI_CALL_THREAD_TIMEOUT: Duration = Duration::from_secs(5);
+const FFI_CALL_THREAD_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub struct OpenCbm {
@@ -183,13 +183,16 @@ impl OpenCbm {
         opencbm_thread_timeout!({ opencbm_retry!(cbm_reset(handle), "cbm_reset") })
     }
 
-    pub fn close(&self) -> OpenCbmResult<()> {
-        let handle = self.handle;
+    pub fn close(&mut self) -> OpenCbmResult<()> {
+        let handle = self.handle as isize;
+        self.handle = 0;
 
         opencbm_thread_timeout!({
             debug!("Calling: cbm_driver_close");
             unsafe { cbm_driver_close(handle) };
             debug!("Returned: cbm_driver_close");
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            debug!("Waited for 1s");
             Ok(())
         })
     }
@@ -318,7 +321,8 @@ impl OpenCbm {
     /// * `buf` - Buffer to store the status string
     pub fn device_status(&self, device: u8, size: usize) -> OpenCbmResult<(Vec<u8>, i32)> {
         let handle = self.handle;
-        let mut buf = vec![0; size];
+        let mut buf = Vec::with_capacity(size);
+        unsafe { buf.set_len(size); }
 
         opencbm_thread_timeout!({
             let result = unsafe {

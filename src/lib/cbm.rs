@@ -81,30 +81,12 @@ impl Cbm {
 
         let status = String::from_utf8_lossy(&buf);
 
-        // Here's sample string that may be returned:
-        //     00, OK,00,00#015#000OR,00,00
-        // Here it's only valid to the #
-        //     #015 means CR
-        //     #000 mean NULL
-        // The rest of the data was left over because libopencbm prefills
-        // the status buffer with:
-        //     99, DRIVER ERROR,00,00
-        // And 00, OK,00,00 then \r \0 overwrites it leaving OR,00,00
-        //
-        // Hence we want to strip any #015#000 and the remainder.  However if
-        // we come across #015 and no #000 then we should insert a newline
-        // and then continue capturing data cos it may be a multiple line
-        // status.  I think I saw these with my 2040 drive.
-        //
-        // We'll turn #015 into \n instead of \r because it's more useful on
-        // linux
-
-        // Split at "#015#000" (CR+NUL) if present, otherwise process the whole string
-        let processed = if let Some(main_status) = status.split("#015#000").next() {
+        // The returned string may have \r in it.  If so get rid of that and
+        // anything remaing.
+        let processed = if let Some(main_status) = status.split("\r").next() {
             main_status.to_string()
         } else {
-            // If no CR+NUL sequence, replace "#015" with newline and continue to the end
-            status.replace("#015", "\n")
+            status.to_string()
         };
 
         CbmStatus::new(processed.trim(), device).map(|s| Ok(s))?
