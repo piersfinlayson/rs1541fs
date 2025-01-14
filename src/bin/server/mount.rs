@@ -11,7 +11,7 @@ use fuser::{
     spawn_mount2, BackgroundSession, FileAttr, Filesystem, MountOption, ReplyAttr, ReplyData,
     ReplyDirectory, ReplyEntry, Request,
 };
-use log::{debug, info, trace};
+use log::{debug, info, trace, warn};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt;
@@ -296,6 +296,7 @@ impl Mount {
 
         // Double check we're not already running in fuser
         if self.fuser.is_some() {
+            warn!("Foud that we already have a fuser thread when mounting");
             return Err(MountError::InternalError(format!(
                 "Trying to mount an already mounted Mount object {}",
                 self.mountpoint.display()
@@ -308,14 +309,28 @@ impl Mount {
         // the directory, there's no harm in doing so, and may reset some bad
         // state in the drive.  We could also decide to do a soft reset of
         // the drive at this point.
-        // Note we want to ignore error 21 READ ERROR (no sync character) as
-        // this means there's no disk in the drive which we support even with
-        // a mounted filesystem.
+        // Note we want to ignore any read errors as this means there's no
+        // disk, or one which can't be read int he drive.  We support this
+        // even with a mounted filesystem.
+        // We don't want to ignore all errors - for example we just shouldn't
+        // get a write error or syntax error as we shouldn't be writing!
         // If we don't succeed in initing (with perhaps an error 21) we will
         // the mount (and not bother mounting fuser)
 
         // Construct errors to ignore in drive_init
-        let ignore = vec![CbmErrorNumber::ReadErrorNoSyncCharacter];
+        // We don't need to provide Ok here - is won't be treated as an error
+        // anyway
+        let ignore = vec![
+            CbmErrorNumber::ReadErrorBlockHeaderNotFound,
+            CbmErrorNumber::ReadErrorNoSyncCharacter,
+            CbmErrorNumber::ReadErrorDataBlockNotPresent,
+            CbmErrorNumber::ReadErrorChecksumErrorInDataBlock,
+            CbmErrorNumber::ReadErrorByteDecodingError,
+            CbmErrorNumber::ReadErrorChecksumErrorInHeader,
+            CbmErrorNumber::DiskIdMismatch,
+            CbmErrorNumber::DosMismatch,
+            CbmErrorNumber::DriveNotReady,
+        ];
 
         // Init the drive
         locking_section!("Lock", "Drive Manager", {
@@ -326,7 +341,8 @@ impl Mount {
                 .await
                 .inspect(|status_vec| {
                     debug!("Status from drive (error 21 ignored): {:?}", status_vec)
-                })?;
+                })
+                .inspect_err(|e| info!("Hit error initializing drive when mounting {}", e))?;
         });
 
         // Create a shared mutex for self, as this is what we'll need to
@@ -339,7 +355,8 @@ impl Mount {
         let mount_clone = mount.clone();
         locking_section!("Lock", "Mount", {
             let mut mount_clone = mount_clone.write().await;
-            mount_clone.create_fuser().await?;
+            mount_clone.create_fuser().await
+            .inspect_err(|e| debug!("Failed to create fuser thread for mount {}", e))?;
         });
 
         // TO DO
@@ -361,10 +378,17 @@ impl Mount {
     async fn get_fs_name(&self) -> String {
         locking_section!("Read", "Drive", {
             let guard = self.drive_unit.read().await;
+            let dir_string = match guard.device_type.num_disk_drives() {
+                1 => "_d0",
+                2 => "_d0_d1",
+                _ => "",
+            };
+
             format!(
-                "{}_{}",
+                "{}_u{}{}",
                 guard.device_type.to_fs_name().to_lowercase(),
-                guard.device_number.to_string()
+                guard.device_number.to_string(),
+                dir_string,
             )
         })
     }
