@@ -34,6 +34,8 @@ pub enum DriveError {
     InvalidState(u8, String),
     #[error("OpenCBM error: device number {0} error {1}")]
     OpenCbmError(u8, String),
+    #[error("Other error: {0} {1}")]
+    OtherError(u8, String),
 }
 
 impl From<CbmError> for DriveError {
@@ -76,6 +78,8 @@ impl From<CbmError> for DriveError {
             CbmError::ValidationError(message) => DriveError::InvalidState(0, message),
 
             CbmError::UsbError(message) => DriveError::OpenCbmError(0, message),
+
+            CbmError::ParseError { message } => DriveError::OtherError(0, message),
         }
     }
 }

@@ -52,6 +52,9 @@ pub enum CbmError {
     /// Used when validation fails
     ValidationError(String),
     UsbError(String),
+    ParseError {
+        message: String,
+    },
 }
 
 impl std::error::Error for CbmError {
@@ -83,6 +86,10 @@ impl From<OpenCbmError> for CbmError {
                 device: 0,
                 message: msg,
             },
+            OpenCbmError::FailedCall(rc, msg) => CbmError::OpenCbmError {
+                device: None,
+                error: OpenCbmError::FailedCall(rc, msg),
+            },
         }
     }
 }
@@ -111,6 +118,7 @@ impl CbmError {
             CbmError::ValidationError { .. } => EINVAL,
             CbmError::StatusError { .. } => EPERM,
             CbmError::UsbError(_msg) => ENXIO,
+            CbmError::ParseError { message: _ } => EINVAL,
         }
     }
 
@@ -205,6 +213,9 @@ impl fmt::Display for CbmError {
             }
             CbmError::UsbError(msg) => {
                 write!(f, "USB error: {}", msg.to_string())
+            }
+            CbmError::ParseError { message } => {
+                write!(f, "Parse error: {}", message.to_string())
             }
         }
     }
@@ -743,6 +754,7 @@ pub enum CbmFileType {
     SEQ,
     USR,
     REL,
+    Unknown,
 }
 
 impl CbmFileType {
@@ -752,6 +764,33 @@ impl CbmFileType {
             CbmFileType::SEQ => ",S",
             CbmFileType::USR => ",U",
             CbmFileType::REL => ",R",
+            CbmFileType::Unknown => "",
+        }
+    }
+}
+
+impl fmt::Display for CbmFileType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let output = match self {
+            CbmFileType::PRG => "prg",
+            CbmFileType::SEQ => "seq",
+            CbmFileType::USR => "usr",
+            CbmFileType::REL => "rel",
+            CbmFileType::Unknown => "",
+        };
+        write!(f, "{}", output)?;
+        Ok(())
+    }
+}
+
+impl From<&str> for CbmFileType {
+    fn from(s: &str) -> Self {
+        match s.to_uppercase().as_str() {
+            "PRG" => CbmFileType::PRG,
+            "SEQ" => CbmFileType::SEQ,
+            "USR" => CbmFileType::USR,
+            "REL" => CbmFileType::REL,
+            _ => CbmFileType::Unknown,
         }
     }
 }

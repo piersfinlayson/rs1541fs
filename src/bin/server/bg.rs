@@ -405,6 +405,8 @@ impl From<MountSvcError> for OpError {
             MountSvcError::InvalidState(dev, state) => {
                 OpError::InvalidState(format!("Device {}: {}", dev, state))
             }
+
+            MountSvcError::OtherError(_dev, msg) => OpError::ValidationError(msg),
         }
     }
 }
@@ -433,6 +435,7 @@ impl From<DriveError> for OpError {
             DriveError::OpenCbmError(dev, msg) => {
                 OpError::HardwareError(format!("OpenCBM error on device {}: {}", dev, msg))
             }
+            DriveError::OtherError(_dev, msg) => OpError::ValidationError(msg),
         }
     }
 }
@@ -470,6 +473,7 @@ impl From<CbmError> for OpError {
 
             CbmError::ValidationError(msg) => OpError::ValidationError(msg),
             CbmError::UsbError(msg) => OpError::HardwareError(msg),
+            CbmError::ParseError { message } => OpError::ValidationError(message),
         }
     }
 }

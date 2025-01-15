@@ -12,9 +12,9 @@ struct Args {
     #[arg(short, long, default_value_t = 8)]
     device: u8,
 
-    /// Verbose output
-    #[arg(short, long)]
-    verbose: bool,
+    /// Verbosity level (-v for debug, -vv for trace)
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    verbose: u8,
 }
 
 fn main() -> Result<()> {
@@ -22,10 +22,10 @@ fn main() -> Result<()> {
 
     // Setup logging
     env_logger::builder()
-        .filter_level(if args.verbose {
-            LevelFilter::Debug
-        } else {
-            LevelFilter::Info
+        .filter_level(match args.verbose {
+            0 => LevelFilter::Info,
+            1 => LevelFilter::Debug,
+            _ => LevelFilter::Trace,
         })
         .init();
 
@@ -61,12 +61,40 @@ fn main() -> Result<()> {
                         Err(e) => println!("Error: {}", e),
                     },
 
+                    "dir" | "d" => {
+                        let drive_num = if cmd.len() > 1 {
+                            Some(match cmd[1].parse::<u8>() {
+                                Ok(num) if num <= 1 => num,
+                                _ => {
+                                    println!("Invalid drive number. Must be 0 or 1");
+                                    continue;
+                                }
+                            })
+                        } else {
+                            None
+                        };
+
+                        match cbm.dir(args.device, drive_num) {
+                            Ok(listing) => {
+                                let drive_num = match drive_num {
+                                    Some(dn) => dn,
+                                    None => 0,
+                                };
+                                println!(
+                                    "Directory listing for drive {:?}:\n{}",
+                                    drive_num, listing
+                                );
+                            }
+                            Err(e) => println!("Error reading directory: {}", e),
+                        }
+                    }
+
                     "reset" | "resetbus" | "busreset" | "r" | "b" => match cbm.reset_bus() {
                         Ok(()) => println!("Bus reset complete"),
                         Err(e) => println!("Error: {}", e),
                     },
 
-                    "u" | "usbreset" | "resetusb" => match cbm.blocking_usb_reset() {
+                    "u" | "usbreset" | "resetusb" => match cbm.blocking_usb_reset_will_lock() {
                         Ok(()) => println!("USB reset complete"),
                         Err(e) => println!("Error: {}", e),
                     },
@@ -104,6 +132,7 @@ fn main() -> Result<()> {
                         println!("Available commands:");
                         println!("  i|id|identify       - Get device info");
                         println!("  s|status            - Get device status");
+                        println!("  d|dir [0|1]         - List directory (optional drive number)");
                         println!("  r|b|reset           - Reset the IEC bus");
                         println!("  u|usbreset          - Reset the USB device");
                         println!("  c|command <cmd>     - Send command to device");

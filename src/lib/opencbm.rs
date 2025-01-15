@@ -23,7 +23,7 @@ use bindings::*;
 use crate::cbmtype::CbmDeviceInfo;
 
 use libc::intptr_t;
-use log::{debug, error, warn};
+use log::{debug, error, trace, warn};
 use parking_lot::Mutex;
 use std::error::Error as StdError;
 use std::io::Error;
@@ -48,6 +48,7 @@ pub enum OpenCbmError {
     ThreadTimeout,
     ThreadPanic,
     Other(String),
+    FailedCall(i32, String),
 }
 
 impl From<std::io::Error> for OpenCbmError {
@@ -72,6 +73,7 @@ impl std::fmt::Display for OpenCbmError {
             OpenCbmError::ThreadTimeout => write!(f, "FFI call timed out"),
             OpenCbmError::ThreadPanic => write!(f, "FFI call thread panicked"),
             OpenCbmError::Other(e) => write!(f, "{}", e),
+            OpenCbmError::FailedCall(rc, func) => write!(f, "{} {}", func, rc),
         }
     }
 }
@@ -84,6 +86,7 @@ impl StdError for OpenCbmError {
             OpenCbmError::ThreadTimeout => None,
             OpenCbmError::ThreadPanic => None,
             OpenCbmError::Other(_) => None,
+            OpenCbmError::FailedCall(_, _) => None,
         }
     }
 }
@@ -145,34 +148,37 @@ macro_rules! opencbm_thread_timeout {
     }};
 }
 
-pub type OpenCbmResult<T> = std::result::Result<T, OpenCbmError>;
-
 /// Wrapper for libopencbm integration
 ///
 /// Provides safe access to Cbm operations and ensures proper
 /// synchronization when accessing the hardware bus.
 impl OpenCbm {
-    pub fn open() -> OpenCbmResult<OpenCbm> {
+    pub fn open_driver() -> Result<OpenCbm, OpenCbmError> {
+        trace!("OpenCbm: Entered open_driver");
         let handle = Arc::new(Mutex::new(0 as intptr_t));
         let handle_clone = handle.clone();
 
-        let result = opencbm_thread_timeout!({
-            let mut handle_guard = handle_clone.lock();
-            let adapter: *mut i8 = std::ptr::null_mut();
+        let result = Ok(OpenCbm {
+            handle: opencbm_thread_timeout!({
+                let mut handle_guard = handle_clone.lock();
+                let adapter: *mut i8 = std::ptr::null_mut();
 
-            match opencbm_retry!(
-                cbm_driver_open_ex(&mut *handle_guard as *mut intptr_t, adapter),
-                "cbm_driver_open_ex"
-            ) {
-                Ok(()) => Ok(*handle_guard),
-                Err(e) => Err(e),
-            }
-        })?;
+                match opencbm_retry!(
+                    cbm_driver_open_ex(&mut *handle_guard as *mut intptr_t, adapter),
+                    "cbm_driver_open_ex"
+                ) {
+                    Ok(()) => Ok(*handle_guard),
+                    Err(e) => Err(e),
+                }
+            })?,
+        });
 
-        Ok(OpenCbm { handle: result })
+        trace!("OpenCbm: Exited open_driver {:?}", result);
+        result
     }
 
-    pub fn reset(&self) -> OpenCbmResult<()> {
+    pub fn reset(&self) -> Result<(), OpenCbmError> {
+        trace!("OpenCbm: Entered reset");
         if self.handle <= 0 || self.handle > isize::MAX as isize {
             error!("Invalid handle value: {:#x}", self.handle);
             return Err(Error::new(ErrorKind::InvalidInput, "Invalid handle value").into());
@@ -180,24 +186,104 @@ impl OpenCbm {
 
         let handle = self.handle; // Clone because we need to move it to the thread
 
-        opencbm_thread_timeout!({ opencbm_retry!(cbm_reset(handle), "cbm_reset") })
+        let result = opencbm_thread_timeout!({ opencbm_retry!(cbm_reset(handle), "cbm_reset") });
+        trace!("OpenCbm: Exited reset {:?}", result);
+        result
     }
 
-    pub fn close(&mut self) -> OpenCbmResult<()> {
+    pub fn close_driver(&mut self) -> Result<(), OpenCbmError> {
+        trace!("OpenCbm: Entered close_driver");
         let handle = self.handle as isize;
         self.handle = 0;
 
-        opencbm_thread_timeout!({
+        let result = opencbm_thread_timeout!({
             debug!("Calling: cbm_driver_close");
             unsafe { cbm_driver_close(handle) };
             debug!("Returned: cbm_driver_close");
             std::thread::sleep(std::time::Duration::from_millis(1000));
             debug!("Waited for 1s");
             Ok(())
-        })
+        });
+
+        trace!("OpenCbm: Exited close_driver");
+        return result;
     }
 
-    pub fn identify(&self, device: u8) -> OpenCbmResult<CbmDeviceInfo> {
+    /// Opens a file on the CBM bus
+    ///
+    /// # Arguments
+    /// * `device` - Device number (usually 8-11 for disk drives)
+    /// * `secondary_address` - Secondary address (channel number)
+    /// * `filename` - Name of the file to open
+    ///
+    /// # Safety
+    /// The filename must be valid for the length specified and must not contain null bytes
+    ///
+    /// # Returns
+    /// Result containing the status code from the operation
+    pub fn open_file(
+        &self,
+        device: u8,
+        secondary_address: u8,
+        filename: &str,
+    ) -> Result<(), OpenCbmError> {
+        trace!(
+            "OpenCbm: Entered open_file {} {} {}",
+            device,
+            secondary_address,
+            filename
+        );
+        let handle = self.handle;
+        // Create owned copy of the bytes to ensure they live through the C call
+        let filename_bytes = ascii_to_petscii(filename);
+        trace!("Open petscii filename: {:?}", filename_bytes);
+
+        let result = opencbm_thread_timeout!({
+            match unsafe {
+                cbm_open(
+                    handle,
+                    device,
+                    secondary_address,
+                    filename_bytes.as_ptr() as *const ::std::os::raw::c_void,
+                    filename_bytes.len(),
+                )
+            } {
+                0 => Ok(()),
+                e => Err(OpenCbmError::FailedCall(e, "open_file".to_string())),
+            }
+        });
+        trace!("OpenCbm: Exited open_file {:?}", result);
+        return result;
+    }
+
+    /// Closes a previously opened file on the CBM bus
+    ///
+    /// # Arguments
+    /// * `device` - Device number (must match the one used in open)
+    /// * `secondary_address` - Secondary address (must match the one used in open)
+    ///
+    /// # Returns
+    /// Result containing the status code from the operation
+    pub fn close_file(&self, device: u8, secondary_address: u8) -> Result<(), OpenCbmError> {
+        trace!(
+            "OpenCbm: Entered close_file {} {}",
+            device,
+            secondary_address
+        );
+        let handle = self.handle;
+
+        let result = opencbm_thread_timeout!({
+            match unsafe { cbm_close(handle, device, secondary_address) } {
+                0 => Ok(()),
+                e => Err(OpenCbmError::FailedCall(e, "close_file".to_string())),
+            }
+        });
+        trace!("OpenCbm: Exited close_file");
+        result
+    }
+
+    pub fn identify(&self, device: u8) -> Result<CbmDeviceInfo, OpenCbmError> {
+        trace!("OpenCbm: Entered identify {}", device);
         let handle = self.handle; // Clone because we need to move it to the thread
 
         opencbm_thread_timeout!({
@@ -219,14 +305,16 @@ impl OpenCbm {
                 }
             };
 
-            if result == 0 {
+            let result = if result == 0 {
                 Ok(CbmDeviceInfo {
                     device_type: device_type.into(),
                     description,
                 })
             } else {
                 Err(OpenCbmError::UnknownDevice(description))
-            }
+            };
+            trace!("OpenCbm: Exited identify {} {:?}", device, result);
+            result
         })
     }
 
@@ -238,11 +326,12 @@ impl OpenCbm {
     /// To use:
     /// let buf = vec![0; size];  // Create a buffer of appropriate size
     /// let (buf, result) = opencbm.raw_read(buf)?;
-    pub fn raw_read(&self, size: usize) -> OpenCbmResult<(Vec<u8>, i32)> {
+    pub fn raw_read(&self, size: usize) -> Result<(Vec<u8>, i32), OpenCbmError> {
+        //trace!("OpenCbm: Entered raw_read {}", size);
         let handle = self.handle;
         let mut buf = vec![0; size];
 
-        opencbm_thread_timeout!({
+        let result = opencbm_thread_timeout!({
             let result = unsafe {
                 cbm_raw_read(
                     handle,
@@ -250,19 +339,26 @@ impl OpenCbm {
                     buf.len(),
                 )
             };
-            Ok((buf, result))
-        })
+            if result >= 0 {
+                Ok((buf, result))
+            } else {
+                Err(OpenCbmError::FailedCall(result, "cbm_raw_read".to_string()))
+            }
+        });
+        //trace!("OpenCbm: Exited raw_read {:?}", result);
+        result
     }
 
     /// Writes raw data to the CBM bus
     ///
     /// # Safety
     /// The buffer must contain valid data of the specified size
-    pub fn raw_write(&self, data: &[u8]) -> OpenCbmResult<i32> {
+    pub fn raw_write(&self, data: &[u8]) -> Result<i32, OpenCbmError> {
+        //trace!("OpenCbm: Entered raw_write {}", data.len());
         let handle = self.handle;
         let buf = data.to_vec(); // Create owned copy
 
-        opencbm_thread_timeout!({
+        let result = opencbm_thread_timeout!({
             let result = unsafe {
                 cbm_raw_write(
                     handle,
@@ -270,48 +366,78 @@ impl OpenCbm {
                     buf.len(),
                 )
             };
-            Ok(result)
-        })
+            if result >= 0 {
+                Ok(result)
+            } else {
+                Err(OpenCbmError::FailedCall(
+                    result,
+                    "cbm_raw_write".to_string(),
+                ))
+            }
+        });
+        //trace!("OpenCbm: Exited raw_write {:?}", result);
+        result
     }
 
     /// Sends a LISTEN command to a device on the CBM bus
-    pub fn listen(&self, device: u8, secondary_address: u8) -> OpenCbmResult<i32> {
+    pub fn listen(&self, device: u8, secondary_address: u8) -> Result<(), OpenCbmError> {
+        trace!("OpenCbm: Entered listen {} {}", device, secondary_address);
         let handle = self.handle;
 
-        opencbm_thread_timeout!({
+        let result = opencbm_thread_timeout!({
             let result = unsafe { cbm_listen(handle, device, secondary_address) };
-            Ok(result)
-        })
+            match result {
+                0 => Ok(()),
+                e => Err(OpenCbmError::FailedCall(e, "cbm_listen".to_string())),
+            }
+        });
+        trace!("OpenCbm: Exited listen {:?}", result);
+        result
     }
 
     /// Sends a TALK command to a device on the CBM bus
-    pub fn talk(&self, device: u8, secondary_address: u8) -> OpenCbmResult<i32> {
+    pub fn talk(&self, device: u8, secondary_address: u8) -> Result<(), OpenCbmError> {
+        trace!("OpenCbm: Entered talk {} {}", device, secondary_address);
         let handle = self.handle;
 
-        opencbm_thread_timeout!({
-            let result = unsafe { cbm_talk(handle, device, secondary_address) };
-            Ok(result)
-        })
+        let result = opencbm_thread_timeout!({
+            match unsafe { cbm_talk(handle, device, secondary_address) } {
+                0 => Ok(()),
+                e => Err(OpenCbmError::FailedCall(e, "talk".to_string())),
+            }
+        });
+        trace!("OpenCbm: Exited talk {:?}", result);
+        result
     }
 
     /// Sends an UNLISTEN command to the CBM bus
-    pub fn unlisten(&self) -> OpenCbmResult<i32> {
+    pub fn unlisten(&self) -> Result<(), OpenCbmError> {
+        trace!("OpenCbm: Entered unlisten");
         let handle = self.handle;
 
-        opencbm_thread_timeout!({
-            let result = unsafe { cbm_unlisten(handle) };
-            Ok(result)
-        })
+        let result = opencbm_thread_timeout!({
+            match unsafe { cbm_unlisten(handle) } {
+                0 => Ok(()),
+                e => Err(OpenCbmError::FailedCall(e, "unlisten".to_string())),
+            }
+        });
+        trace!("OpenCbm: Exited unlisten: {:?}", result);
+        result
     }
 
     /// Sends an UNTALK command to the CBM bus
-    pub fn untalk(&self) -> OpenCbmResult<i32> {
+    pub fn untalk(&self) -> Result<(), OpenCbmError> {
+        trace!("OpenCbm: Entered untalk");
         let handle = self.handle;
 
-        opencbm_thread_timeout!({
-            let result = unsafe { cbm_untalk(handle) };
-            Ok(result)
-        })
+        let result = opencbm_thread_timeout!({
+            match unsafe { cbm_untalk(handle) } {
+                0 => Ok(()),
+                e => Err(OpenCbmError::FailedCall(e, "untalk".to_string())),
+            }
+        });
+        trace!("OpenCbm: Exited untalk: {:?}", result);
+        result
     }
 
     /// Retrieves the status of a CBM device
@@ -319,14 +445,15 @@ impl OpenCbm {
     /// # Arguments
     /// * `device` - Device number to query
     /// * `buf` - Buffer to store the status string
-    pub fn device_status(&self, device: u8, size: usize) -> OpenCbmResult<(Vec<u8>, i32)> {
+    pub fn device_status(&self, device: u8) -> Result<(Vec<u8>, i32), OpenCbmError> {
+        trace!("OpenCbm: Entered device_status {}", device);
         let handle = self.handle;
-        let mut buf = Vec::with_capacity(size);
+        let mut buf = Vec::with_capacity(256);
         unsafe {
-            buf.set_len(size);
+            buf.set_len(256);
         }
 
-        opencbm_thread_timeout!({
+        let result = opencbm_thread_timeout!({
             let result = unsafe {
                 cbm_device_status(
                     handle,
@@ -336,7 +463,9 @@ impl OpenCbm {
                 )
             };
             Ok((buf, result))
-        })
+        });
+        trace!("OpenCbm: Exited device_status {:?}", result);
+        result
     }
 }
 
@@ -400,7 +529,7 @@ pub fn petscii_to_ascii(input: &[u8]) -> String {
 
 impl Drop for OpenCbm {
     fn drop(&mut self) {
-        if let Err(e) = self.close() {
+        if let Err(e) = self.close_driver() {
             error!("Error closing CBM device: {}", e);
         }
     }

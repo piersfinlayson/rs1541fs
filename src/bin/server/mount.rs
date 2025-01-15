@@ -87,6 +87,8 @@ impl From<CbmError> for MountError {
             }
 
             CbmError::UsbError(message) => MountError::CbmError(message),
+
+            CbmError::ParseError { message } => MountError::ValidationError(message),
         }
     }
 }
@@ -138,6 +140,7 @@ impl From<DriveError> for MountError {
                 "OpenCBM error: device number {} error {}",
                 device, msg
             )),
+            DriveError::OtherError(_dev, msg) => MountError::ValidationError(msg),
         }
     }
 }

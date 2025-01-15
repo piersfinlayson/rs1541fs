@@ -1,6 +1,8 @@
 pub use crate::cbmtype::CbmDeviceInfo;
-use crate::cbmtype::{CbmDeviceType, CbmError, CbmErrorNumber, CbmErrorNumberOk, CbmStatus};
-use crate::opencbm::{ascii_to_petscii, OpenCbm};
+use crate::cbmtype::{
+    CbmDeviceType, CbmError, CbmErrorNumber, CbmErrorNumberOk, CbmFileType, CbmStatus,
+};
+use crate::opencbm::{ascii_to_petscii, petscii_to_ascii, OpenCbm};
 use crate::{parse_lsusb_output, parse_usbreset_output, run_command};
 
 use log::{debug, info, trace, warn};
@@ -25,11 +27,11 @@ impl Cbm {
     /// Create a Cbm object, which will open the OpenCBM driver using the
     /// default device
     pub fn new() -> Result<Self, CbmError> {
-        let cbm = OpenCbm::open().map_err(|e| CbmError::DeviceError {
+        let cbm = OpenCbm::open_driver().map_err(|e| CbmError::DeviceError {
             device: 0,
             message: e.to_string(),
         })?;
-        info!("Reseting IEC/IEEE-488 bus");
+        info!("Resetting IEC/IEEE-488 bus");
         cbm.reset().map_err(|e| CbmError::DeviceError {
             device: 0,
             message: e.to_string(),
@@ -51,17 +53,22 @@ impl Cbm {
     ///
     /// If running within tokio use tokio::task::spawn_blocking and run this
     /// within that.
-    pub fn blocking_usb_reset(&mut self) -> Result<(), CbmError> {
+    pub fn blocking_usb_reset_will_lock(&mut self) -> Result<(), CbmError> {
         warn!("Performing USB level reset of xum1541 device");
 
         const CBM_DROP_SLEEP_DURATION: Duration = Duration::from_millis(500);
 
         // cbm.lock() section
         {
-            trace!("Lock and drop cbm.handle");
+            trace!("Lock cbm.handle");
             let mut cbm_handle_guard = self.handle.lock();
-            let handle = cbm_handle_guard.take();
-            drop(handle);
+            if let Some(handle) = cbm_handle_guard.take() {
+                trace!("Dropping cbm.handle");
+                drop(handle); // Now we're sure we're dropping an actual OpenCbm instance
+            }
+
+            // Not sure this is required, but putting in for safety
+            trace!("Sleep for {:?}", CBM_DROP_SLEEP_DURATION);
             sleep(CBM_DROP_SLEEP_DURATION);
 
             // Run lsusb
@@ -72,7 +79,7 @@ impl Cbm {
 
             // Find the XUM1541's bus ID and device ID
             trace!("Parse lsusb output: {}", lsusb_output);
-            let (bus, device) = match parse_lsusb_output(&lsusb_output, "xum1541") {
+            let (bus, device) = match parse_lsusb_output(&lsusb_output, "16d0", "0504") {
                 Some(x) => x,
                 None => {
                     return Err(CbmError::UsbError(format!(
@@ -96,6 +103,10 @@ impl Cbm {
                     usbreset_output
                 )));
             }
+
+            // Not sure this is required, but putting in for safety
+            trace!("Sleep for {:?}", CBM_DROP_SLEEP_DURATION);
+            sleep(CBM_DROP_SLEEP_DURATION);
 
             // Now recreate the OpenCBM handle
             let new_cbm = Cbm::new()?;
@@ -125,9 +136,7 @@ impl Cbm {
         self.handle
             .lock()
             .as_ref()
-            .ok_or(CbmError::UsbError(
-                "No CBM handle".to_string(),
-            ))?
+            .ok_or(CbmError::UsbError("No CBM handle".to_string()))?
             .identify(device)
             .map_err(|e| CbmError::DeviceError {
                 device,
@@ -135,15 +144,9 @@ impl Cbm {
             })
     }
 
-    pub fn get_status(&self, device: u8) -> Result<CbmStatus, CbmError> {
-        let (buf, result) = self
-            .handle
-            .lock()
-            .as_ref()
-            .ok_or(CbmError::UsbError(
-                "No CBM handle".to_string(),
-            ))?
-            .device_status(device, 256)
+    pub fn get_status_already_locked(cbm: &OpenCbm, device: u8) -> Result<CbmStatus, CbmError> {
+        let (buf, result) = cbm
+            .device_status(device)
             .map_err(|e| CbmError::DeviceError {
                 device,
                 message: e.to_string(),
@@ -166,12 +169,19 @@ impl Cbm {
         CbmStatus::new(&status, device)
     }
 
+    pub fn get_status(&self, device: u8) -> Result<CbmStatus, CbmError> {
+        let guard = self.handle.lock();
+        let cbm = guard
+            .as_ref()
+            .ok_or(CbmError::UsbError("No CBM handle".to_string()))?;
+        Self::get_status_already_locked(cbm, device)
+    }
+
     pub fn send_command(&self, device: u8, command: &str) -> Result<(), CbmError> {
         let guard = self.handle.lock();
-        let cbm = guard.as_ref()
-            .ok_or(CbmError::UsbError(
-                "No CBM handle".to_string(),
-            ))?;
+        let cbm = guard
+            .as_ref()
+            .ok_or(CbmError::UsbError("No CBM handle".to_string()))?;
 
         debug!("Send command: {}", command);
 
@@ -227,10 +237,9 @@ impl Cbm {
     /// Read file from disk
     pub fn read_file(&self, device: u8, filename: &str) -> Result<Vec<u8>, CbmError> {
         let guard = self.handle.lock();
-        let _cbm = guard.as_ref()
-        .ok_or(CbmError::UsbError(
-            "No CBM handle".to_string(),
-        ))?;
+        let _cbm = guard
+            .as_ref()
+            .ok_or(CbmError::UsbError("No CBM handle".to_string()))?;
         let mut data = Vec::new();
 
         // Find a free channel (0-14)
@@ -285,10 +294,9 @@ impl Cbm {
     /// Write file to disk
     pub fn write_file(&self, device: u8, filename: &str, data: &[u8]) -> Result<(), CbmError> {
         let guard = self.handle.lock();
-        let _cbm = guard.as_ref()
-        .ok_or(CbmError::UsbError(
-            "No CBM handle".to_string(),
-        ))?;
+        let _cbm = guard
+            .as_ref()
+            .ok_or(CbmError::UsbError("No CBM handle".to_string()))?;
 
         // Find a free channel (0-14)
         // In a real implementation, we'd use the CbmChannelManager here
@@ -343,6 +351,7 @@ impl Cbm {
 
         Ok(())
     }
+
     /// Delete a file from disk
     pub fn delete_file(&self, device: u8, filename: &str) -> Result<(), CbmError> {
         // Construct scratch command (S:filename)
@@ -360,6 +369,187 @@ impl Cbm {
 
         // Check status after validation
         self.get_status(device)?.into()
+    }
+
+    fn error_untalk_and_close_file(cbm: &OpenCbm, device: u8, channel_num: u8) {
+        trace!("Cbm: Entered error_untalk_and_close_file");
+        let _ = cbm
+            .untalk()
+            .inspect_err(|_| debug!("Untalk failed {} {}", device, channel_num));
+
+        let _ = cbm
+            .close_file(device, channel_num)
+            .inspect_err(|_| debug!("Close file failed {} {}", device, channel_num));
+        trace!("Cbm: Exited error_untalk_and_close_file");
+    }
+
+    /// Get directory listing from device
+    ///
+    /// # Arguments
+    /// * `device` - Device number (usually 8-11 for disk drives)
+    /// * `drive_num` - Optional drive number (0 or 1 for dual drives)
+    ///
+    /// # Returns
+    /// Result containing the directory listing as a String
+    pub fn dir(&self, device: u8, drive_num: Option<u8>) -> Result<CbmDirListing, CbmError> {
+        // Validate drive_num - must be None, Some(0) or Some(1)
+        if let Some(drive_num) = drive_num {
+            if drive_num > 1 {
+                return Err(CbmError::InvalidOperation {
+                    device,
+                    message: format!("Invalid drive number {} - must be 0 or 1", drive_num),
+                });
+            }
+        }
+
+        trace!("Lock cbm");
+        let guard = self.handle.lock();
+        let cbm = guard
+            .as_ref()
+            .ok_or(CbmError::UsbError("No CBM handle".to_string()))?;
+
+        // Construct directory command ("$" or "$0" or "$1")
+        let dir_cmd = match drive_num {
+            Some(num) => format!("${}", num),
+            None => "$".to_string(),
+        };
+        trace!("Construct dir command {}", dir_cmd);
+
+        trace!("Open file");
+        let channel_num = 0;
+        cbm.open_file(device, channel_num, &dir_cmd)
+            .map_err(|e| CbmError::DeviceError {
+                device,
+                message: format!("Failed to open directory {}: {}", dir_cmd, e),
+            })?;
+
+        let mut output = String::new();
+
+        // Check that open succeeded
+        Self::get_status_already_locked(cbm, device).and_then(|status| {
+            if status.is_ok() != CbmErrorNumberOk::Ok {
+                Err(CbmError::CommandError {
+                    device,
+                    message: format!("Got error status after dir open {}", status),
+                })
+            } else {
+                debug!("status value after dir open {}", status);
+                Ok(())
+            }
+        })?;
+
+        // Read the directory data
+        cbm.talk(device, channel_num)
+            .inspect_err(|_| {
+                debug!("Talk command failed {} {}", device, channel_num);
+                let _ = cbm.close_file(device, channel_num);
+            })
+            .map_err(|e| CbmError::DeviceError {
+                device,
+                message: format!("Talk failed: {}", e),
+            })?;
+
+        // Skip the load address (first two bytes)
+        trace!("Read 2 bytes");
+        let (_buf, result) = cbm
+            .raw_read(2)
+            .inspect_err(|_| Self::error_untalk_and_close_file(cbm, device, channel_num))
+            .map_err(|e| CbmError::DeviceError {
+                device,
+                message: format!("Failed to read load address: {}", e),
+            })?;
+
+        if result == 2 {
+            // Read directory entries
+            loop {
+                trace!("In read loop");
+                // Read link address
+                let (_, count) = cbm
+                    .raw_read(2)
+                    .inspect_err(|_| Self::error_untalk_and_close_file(cbm, device, channel_num))
+                    .map_err(|e| CbmError::DeviceError {
+                        device,
+                        message: format!("Failed to read link address: {}", e),
+                    })?;
+
+                if count != 2 {
+                    break;
+                }
+
+                // Read file size
+                let (size_buf, size_count) = cbm
+                    .raw_read(2)
+                    .inspect_err(|_| Self::error_untalk_and_close_file(cbm, device, channel_num))
+                    .map_err(|e| CbmError::DeviceError {
+                        device,
+                        message: format!("Failed to read file size: {}", e),
+                    })?;
+
+                if size_count != 2 {
+                    break;
+                }
+
+                // Calculate file size (little endian)
+                let size = (size_buf[0] as u16) | ((size_buf[1] as u16) << 8);
+                output.push_str(&format!("{:4} ", size));
+
+                // Read filename characters until 0 byte
+                let mut filename = Vec::new();
+                loop {
+                    let (char_buf, char_count) = cbm
+                        .raw_read(1)
+                        .inspect_err(|_| {
+                            Self::error_untalk_and_close_file(cbm, device, channel_num)
+                        })
+                        .map_err(|e| CbmError::DeviceError {
+                            device,
+                            message: format!("Failed to read filename: {}", e),
+                        })?;
+
+                    if char_count != 1 || char_buf[0] == 0 {
+                        break;
+                    }
+
+                    filename.push(char_buf[0]);
+                }
+                output.push_str(&petscii_to_ascii(&filename));
+                output.push('\n');
+            }
+        }
+
+        // Cleanup
+        cbm.untalk()
+            .inspect_err(|_| Self::error_untalk_and_close_file(cbm, device, channel_num))
+            .map_err(|e| CbmError::DeviceError {
+                device,
+                message: format!("Untalk failed: {}", e),
+            })?;
+
+        cbm.close_file(device, 0)
+            .map_err(|e| CbmError::DeviceError {
+                device,
+                message: format!("Failed to close directory: {}", e),
+            })?;
+
+        // Get final status
+        let status = Self::get_status_already_locked(cbm, device)?;
+        if status.is_ok() != CbmErrorNumberOk::Ok {
+            return Err(status.into());
+        }
+
+        let result = if let Ok(directory) = CbmDirListing::parse(&output) {
+            // Directory is now parsed into a structured format
+            Ok(directory)
+        } else {
+            Err(CbmError::DeviceError {
+                device,
+                message: "Failed to parse directory listing".to_string(),
+            })
+        }?;
+
+        trace!("Dir success: {:?}", result);
+
+        Ok(result)
     }
 }
 
@@ -619,5 +809,198 @@ impl CbmDriveUnit {
 
     pub fn is_busy(&self) -> bool {
         self.busy
+    }
+}
+
+#[derive(Debug)]
+pub enum CbmFileEntry {
+    ValidFile {
+        blocks: u16,
+        filename: String,
+        file_type: CbmFileType,
+    },
+    InvalidFile {
+        raw_line: String,
+        error: String,                    // Description of what went wrong
+        partial_blocks: Option<u16>,      // In case we at least got the blocks
+        partial_filename: Option<String>, // In case we at least got the filename
+    },
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct CbmDiskHeader {
+    drive_number: u8,
+    name: String,
+    id: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct CbmDirListing {
+    header: CbmDiskHeader,
+    files: Vec<CbmFileEntry>,
+    blocks_free: u16,
+}
+
+impl fmt::Display for CbmDiskHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Drive {} Header: \"{}\" ID: {}",
+            self.drive_number, self.name, self.id
+        )
+    }
+}
+
+impl fmt::Display for CbmFileEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CbmFileEntry::ValidFile {
+                blocks,
+                filename,
+                file_type,
+            } => {
+                write!(
+                    f,
+                    "Filename: \"{}.{}\"{:width$}Blocks: {:>3}",
+                    filename,
+                    file_type,
+                    "", // empty string for padding
+                    blocks,
+                    width = 25 - (filename.len() + 3 + 1) // +1 for the dot, +3 for suffix
+                )
+            }
+            CbmFileEntry::InvalidFile {
+                raw_line,
+                error,
+                partial_blocks,
+                partial_filename,
+            } => {
+                write!(f, "Invalid entry: {} ({})", raw_line, error)?;
+                if let Some(filename) = partial_filename {
+                    write!(f, " [Filename: \"{}\"]", filename)?;
+                }
+                if let Some(blocks) = partial_blocks {
+                    write!(f, " [Blocks: {}]", blocks)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl fmt::Display for CbmDirListing {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "{}", self.header)?;
+        for entry in &self.files {
+            writeln!(f, "{}", entry)?;
+        }
+        writeln!(f, "Free blocks: {}", self.blocks_free)
+    }
+}
+
+impl CbmDirListing {
+    pub fn parse(input: &str) -> Result<Self, CbmError> {
+        let mut lines = input.lines();
+
+        // Parse header
+        let header = Self::parse_header(lines.next().ok_or_else(|| CbmError::ParseError {
+            message: "Missing header line".to_string(),
+        })?)?;
+
+        // Parse files
+        let mut files = Vec::new();
+        let mut blocks_free = None;
+
+        for line in lines {
+            if line.contains("blocks free") {
+                blocks_free = Some(Self::parse_blocks_free(line)?);
+                break;
+            } else {
+                files.push(Self::parse_file_entry(line));
+            }
+        }
+
+        let blocks_free = blocks_free.ok_or_else(|| CbmError::ParseError {
+            message: "Missing blocks free line".to_string(),
+        })?;
+
+        Ok(CbmDirListing {
+            header,
+            files,
+            blocks_free,
+        })
+    }
+
+    fn parse_header(line: &str) -> Result<CbmDiskHeader, CbmError> {
+        // Example: "   0 ."test/demo  1/85 " 8a 2a"
+        let re =
+            regex::Regex::new(r#"^\s*(\d+)\s+\."([^"]*)" ([a-zA-Z0-9]{2})"#).map_err(|_| {
+                CbmError::ParseError {
+                    message: "Invalid header regex".to_string(),
+                }
+            })?;
+
+        let caps = re.captures(line).ok_or_else(|| CbmError::ParseError {
+            message: format!("Invalid header format: {}", line),
+        })?;
+
+        Ok(CbmDiskHeader {
+            drive_number: caps[1].parse().map_err(|_| CbmError::ParseError {
+                message: format!("Invalid drive number: {}", &caps[1]),
+            })?,
+            name: caps[2].trim_end().to_string(), // Keep leading spaces, trim trailing
+            id: caps[3].to_string(),
+        })
+    }
+
+    fn parse_file_entry(line: &str) -> CbmFileEntry {
+        let re = regex::Regex::new(r#"^\s*(\d+)\s+"([^"]+)"\s+(\w+)\s*$"#).expect("Invalid regex");
+
+        match re.captures(line) {
+            Some(caps) => {
+                let blocks = match caps[1].trim().parse() {
+                    Ok(b) => b,
+                    Err(_) => {
+                        return CbmFileEntry::InvalidFile {
+                            raw_line: line.to_string(),
+                            error: "Invalid block count".to_string(),
+                            partial_blocks: None,
+                            partial_filename: Some(caps[2].to_string()),
+                        }
+                    }
+                };
+
+                let filetype = CbmFileType::from(&caps[3]);
+
+                CbmFileEntry::ValidFile {
+                    blocks,
+                    filename: caps[2].to_string(), // Keep all spaces
+                    file_type: filetype,
+                }
+            }
+            None => CbmFileEntry::InvalidFile {
+                raw_line: line.to_string(),
+                error: "Could not parse line format".to_string(),
+                partial_blocks: None,
+                partial_filename: None,
+            },
+        }
+    }
+
+    fn parse_blocks_free(line: &str) -> Result<u16, CbmError> {
+        let re =
+            regex::Regex::new(r"^\s*(\d+)\s+blocks free").map_err(|_| CbmError::ParseError {
+                message: "Invalid blocks free regex".to_string(),
+            })?;
+
+        let caps = re.captures(line).ok_or_else(|| CbmError::ParseError {
+            message: format!("Invalid blocks free format: {}", line),
+        })?;
+
+        caps[1].parse().map_err(|_| CbmError::ParseError {
+            message: format!("Invalid blocks free number: {}", &caps[1]),
+        })
     }
 }

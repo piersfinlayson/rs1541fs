@@ -21,14 +21,23 @@ pub fn run_command(command: &str) -> Result<String, std::io::Error> {
 } // Run lsusb to list USB devices
 
 // Function to parse the output of lsusb and find the device path
-pub fn parse_lsusb_output(output: &str, device_type: &str) -> Option<(String, String)> {
+pub fn parse_lsusb_output(
+    output: &str,
+    vendor_id: &str,
+    product_id: &str,
+) -> Option<(String, String)> {
     for line in output.lines() {
-        if line.contains(device_type) {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() > 3 {
-                let bus = parts[1];
-                let device = parts[3].trim_end_matches(':');
-                return Some((bus.to_string(), device.to_string()));
+        if let Some(id_part) = line.split("ID ").nth(1) {
+            if let Some(id_str) = id_part.split_whitespace().next() {
+                let id_parts: Vec<&str> = id_str.split(':').collect();
+                if id_parts.len() == 2 && id_parts[0] == vendor_id && id_parts[1] == product_id {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 4 {
+                        let bus = parts[1].to_string();
+                        let device = parts[3].trim_end_matches(':').to_string();
+                        return Some((bus, device));
+                    }
+                }
             }
         }
     }

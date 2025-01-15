@@ -40,6 +40,8 @@ pub enum MountSvcError {
     DeviceBusy(u8),
     #[error("Invalid device state: {1} device {0}")]
     InvalidState(u8, String),
+    #[error("Other error: {1} device {0}")]
+    OtherError(u8, String),
 }
 
 impl From<DriveError> for MountSvcError {
@@ -56,6 +58,7 @@ impl From<DriveError> for MountSvcError {
             DriveError::DriveBusy(n) => MountSvcError::DeviceBusy(n),
             DriveError::InvalidState(n, s) => MountSvcError::InvalidState(n, s),
             DriveError::OpenCbmError(n, s) => MountSvcError::DeviceError(n, s),
+            DriveError::OtherError(n, s) => MountSvcError::OtherError(n, s),
         }
     }
 }
