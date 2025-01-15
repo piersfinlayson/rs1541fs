@@ -258,7 +258,6 @@ impl FileEntry {
                         Ok(data.len())
                     },
                     ControlFilePurpose::ExecDriveCommand |
-                    ControlFilePurpose::ExecDriveStatus |
                     ControlFilePurpose::ExecDirRefresh => {
                         // These execute immediately on any write
                         // TODO: Execute command/status/refresh on drive
@@ -266,6 +265,7 @@ impl FileEntry {
  
                         Ok(data.len())
                     },
+                    ControlFilePurpose::GetCurDriveStatus |
                     ControlFilePurpose::GetLastDriveStatus |
                     ControlFilePurpose::GetLastErrorStatus => {
                         Err(std::io::Error::new(
