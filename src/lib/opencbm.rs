@@ -33,9 +33,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-// How long to allow an FFI call into libopencbm to take before giving up
-const FFI_CALL_THREAD_TIMEOUT: Duration = Duration::from_secs(30);
-
 #[derive(Debug)]
 pub struct OpenCbm {
     handle: intptr_t,
@@ -123,7 +120,7 @@ macro_rules! opencbm_retry {
 }
 
 macro_rules! opencbm_thread_timeout {
-    ($call:expr) => {{
+    ($timeout_ms:expr, $call:expr) => {{
         let (tx, rx) = mpsc::channel();
 
         let thread_handle = thread::spawn(move || {
@@ -131,7 +128,7 @@ macro_rules! opencbm_thread_timeout {
             let _ = tx.send(result);
         });
 
-        match rx.recv_timeout(FFI_CALL_THREAD_TIMEOUT) {
+        match rx.recv_timeout(Duration::from_millis($timeout_ms)) {
             Ok(result) => {
                 // Wait for thread to finish to ensure cleanup
                 match thread_handle.join() {
@@ -158,8 +155,9 @@ impl OpenCbm {
         let handle = Arc::new(Mutex::new(0 as intptr_t));
         let handle_clone = handle.clone();
 
+        // This resets the bus if required, so may take a little time
         let result = Ok(OpenCbm {
-            handle: opencbm_thread_timeout!({
+            handle: opencbm_thread_timeout!(5000, {
                 let mut handle_guard = handle_clone.lock();
                 let adapter: *mut i8 = std::ptr::null_mut();
 
@@ -177,6 +175,7 @@ impl OpenCbm {
         result
     }
 
+    /// Reset the bus
     pub fn reset(&self) -> Result<(), OpenCbmError> {
         trace!("OpenCbm: Entered reset");
         if self.handle <= 0 || self.handle > isize::MAX as isize {
@@ -186,7 +185,7 @@ impl OpenCbm {
 
         let handle = self.handle; // Clone because we need to move it to the thread
 
-        let result = opencbm_thread_timeout!({ opencbm_retry!(cbm_reset(handle), "cbm_reset") });
+        let result = opencbm_thread_timeout!(2500, { opencbm_retry!(cbm_reset(handle), "cbm_reset") });
         trace!("OpenCbm: Exited reset {:?}", result);
         result
     }
@@ -196,7 +195,8 @@ impl OpenCbm {
         let handle = self.handle as isize;
         self.handle = 0;
 
-        let result = opencbm_thread_timeout!({
+        // This seems to take a little time as well
+        let result = opencbm_thread_timeout!(5000, {
             debug!("Calling: cbm_driver_close");
             unsafe { cbm_driver_close(handle) };
             debug!("Returned: cbm_driver_close");
@@ -238,7 +238,7 @@ impl OpenCbm {
         let filename_bytes = ascii_to_petscii(filename);
         trace!("Open petscii filename: {:?}", filename_bytes);
 
-        let result = opencbm_thread_timeout!({
+        let result = opencbm_thread_timeout!(5000, {
             match unsafe {
                 cbm_open(
                     handle,
@@ -272,7 +272,7 @@ impl OpenCbm {
         );
         let handle = self.handle;
 
-        let result = opencbm_thread_timeout!({
+        let result = opencbm_thread_timeout!(5000, {
             match unsafe { cbm_close(handle, device, secondary_address) } {
                 0 => Ok(()),
                 e => Err(OpenCbmError::FailedCall(e, "close_file".to_string())),
@@ -286,7 +286,7 @@ impl OpenCbm {
         trace!("OpenCbm: Entered identify {}", device);
         let handle = self.handle; // Clone because we need to move it to the thread
 
-        opencbm_thread_timeout!({
+        opencbm_thread_timeout!(5000, {
             let mut device_type: cbm_device_type_e = Default::default();
             let mut description: *const libc::c_char = std::ptr::null();
 
@@ -331,7 +331,7 @@ impl OpenCbm {
         let handle = self.handle;
         let mut buf = vec![0; size];
 
-        let result = opencbm_thread_timeout!({
+        let result = opencbm_thread_timeout!(5000, {
             let result = unsafe {
                 cbm_raw_read(
                     handle,
@@ -358,7 +358,7 @@ impl OpenCbm {
         let handle = self.handle;
         let buf = data.to_vec(); // Create owned copy
 
-        let result = opencbm_thread_timeout!({
+        let result = opencbm_thread_timeout!(5000, {
             let result = unsafe {
                 cbm_raw_write(
                     handle,
@@ -384,7 +384,7 @@ impl OpenCbm {
         trace!("OpenCbm: Entered listen {} {}", device, secondary_address);
         let handle = self.handle;
 
-        let result = opencbm_thread_timeout!({
+        let result = opencbm_thread_timeout!(5000, {
             let result = unsafe { cbm_listen(handle, device, secondary_address) };
             match result {
                 0 => Ok(()),
@@ -400,7 +400,7 @@ impl OpenCbm {
         trace!("OpenCbm: Entered talk {} {}", device, secondary_address);
         let handle = self.handle;
 
-        let result = opencbm_thread_timeout!({
+        let result = opencbm_thread_timeout!(5000, {
             match unsafe { cbm_talk(handle, device, secondary_address) } {
                 0 => Ok(()),
                 e => Err(OpenCbmError::FailedCall(e, "talk".to_string())),
@@ -415,7 +415,7 @@ impl OpenCbm {
         trace!("OpenCbm: Entered unlisten");
         let handle = self.handle;
 
-        let result = opencbm_thread_timeout!({
+        let result = opencbm_thread_timeout!(5000, {
             match unsafe { cbm_unlisten(handle) } {
                 0 => Ok(()),
                 e => Err(OpenCbmError::FailedCall(e, "unlisten".to_string())),
@@ -430,7 +430,7 @@ impl OpenCbm {
         trace!("OpenCbm: Entered untalk");
         let handle = self.handle;
 
-        let result = opencbm_thread_timeout!({
+        let result = opencbm_thread_timeout!(5000, {
             match unsafe { cbm_untalk(handle) } {
                 0 => Ok(()),
                 e => Err(OpenCbmError::FailedCall(e, "untalk".to_string())),
@@ -453,7 +453,7 @@ impl OpenCbm {
             buf.set_len(256);
         }
 
-        let result = opencbm_thread_timeout!({
+        let result = opencbm_thread_timeout!(5000, {
             let result = unsafe {
                 cbm_device_status(
                     handle,

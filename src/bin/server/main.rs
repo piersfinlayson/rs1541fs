@@ -7,6 +7,7 @@ mod ipc;
 mod mount;
 mod mountsvc;
 mod signal;
+mod file;
 
 use args::Args;
 use daemon::Daemon;
