@@ -55,6 +55,7 @@ pub enum CbmError {
     ParseError {
         message: String,
     },
+    DriverNotOpen,
 }
 
 impl std::error::Error for CbmError {
@@ -90,6 +91,10 @@ impl From<OpenCbmError> for CbmError {
                 device: None,
                 error: OpenCbmError::FailedCall(rc, msg),
             },
+            OpenCbmError::UsbError(rc, msg) => CbmError::UsbError(format!("{:?} {}", rc, msg)),
+            OpenCbmError::DriverNotOpen() => {
+                CbmError::UsbError(format!("The OpenCBM driver is not open"))
+            }
         }
     }
 }
@@ -119,6 +124,7 @@ impl CbmError {
             CbmError::StatusError { .. } => EPERM,
             CbmError::UsbError(_msg) => ENXIO,
             CbmError::ParseError { message: _ } => EINVAL,
+            CbmError::DriverNotOpen => ENXIO,
         }
     }
 
@@ -216,6 +222,9 @@ impl fmt::Display for CbmError {
             }
             CbmError::ParseError { message } => {
                 write!(f, "Parse error: {}", message.to_string())
+            }
+            CbmError::DriverNotOpen => {
+                write!(f, "Driver not open")
             }
         }
     }

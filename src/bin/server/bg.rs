@@ -473,6 +473,7 @@ impl From<CbmError> for OpError {
 
             CbmError::ValidationError(msg) => OpError::ValidationError(msg),
             CbmError::UsbError(msg) => OpError::HardwareError(msg),
+            CbmError::DriverNotOpen => OpError::HardwareError("Driver not open".to_string()),
             CbmError::ParseError { message } => OpError::ValidationError(message),
         }
     }

@@ -78,6 +78,7 @@ impl From<CbmError> for DriveError {
             CbmError::ValidationError(message) => DriveError::InvalidState(0, message),
 
             CbmError::UsbError(message) => DriveError::OpenCbmError(0, message),
+            CbmError::DriverNotOpen => DriveError::OpenCbmError(0, format!("Driver not open")),
 
             CbmError::ParseError { message } => DriveError::OtherError(0, message),
         }

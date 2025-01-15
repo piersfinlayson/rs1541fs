@@ -1,4 +1,7 @@
-use rs1541fs::cbm::{Cbm, CbmFileEntry, CbmDiskHeader};
+#![allow(dead_code)]
+
+
+use rs1541fs::cbm::{Cbm, CbmDiskHeader, CbmFileEntry};
 use std::time::SystemTime;
 use thiserror::Error;
 
@@ -9,7 +12,7 @@ pub enum FileError {
     #[error("Read only file: {filename}")]
     ReadOnly { filename: String },
     #[error("No buffer available: {error}")]
-    NoBuffer { error: String }
+    NoBuffer { error: String },
 }
 
 #[derive(Debug)]
@@ -48,18 +51,16 @@ impl Buffer {
                 if self.complete {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
-                        "Buffer already complete"
+                        "Buffer already complete",
                     ));
                 }
                 self.data.extend_from_slice(data);
                 Ok(data.len())
             }
-            BufferType::Read => {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "Cannot write to read buffer"
-                ))
-            }
+            BufferType::Read => Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Cannot write to read buffer",
+            )),
         }
     }
 
@@ -72,12 +73,10 @@ impl Buffer {
                 let end = std::cmp::min(offset + size, self.data.len());
                 Ok(&self.data[offset..end])
             }
-            BufferType::Write => {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "Cannot read from write buffer"
-                ))
-            }
+            BufferType::Write => Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Cannot read from write buffer",
+            )),
         }
     }
 
@@ -124,14 +123,14 @@ impl ControlFile {
             ControlFilePurpose::ExecDirRefresh => ControlFileType::ReadWrite,
             ControlFilePurpose::ExecFormatDrive => ControlFileType::ReadWrite,
         };
-        
+
         // Initialize appropriate buffer type based on file_type
         let buffer = match file_type {
             ControlFileType::Read => Some(Buffer::new_read()),
             ControlFileType::Write => Some(Buffer::new_write()),
-            ControlFileType::ReadWrite => None,  // Decide based on first operation
+            ControlFileType::ReadWrite => None, // Decide based on first operation
         };
-        
+
         ControlFile {
             purpose,
             file_type,
@@ -150,12 +149,11 @@ pub enum FileEntryType {
 #[derive(Debug)]
 pub struct FuseFile {
     // Common FUSE attributes
-    pub name: String,          // The name as it appears in the FUSE filesystem
-    pub size: u64,            // Size in bytes
-    pub permissions: u16,      // Unix-style permissions
+    pub name: String,     // The name as it appears in the FUSE filesystem
+    pub size: u64,        // Size in bytes
+    pub permissions: u16, // Unix-style permissions
     pub modified_time: SystemTime,
     pub created_time: SystemTime,
-
 }
 
 /// Main object handling file entries, both the FUSE side and 1541fsd/CBM side
@@ -171,27 +169,26 @@ pub struct FileEntry {
     buffer: Option<Buffer>,
 }
 
-
 impl FileEntry {
     pub fn new(name: String, entry_type: FileEntryType) -> Self {
         let (size, permissions, buffer_type) = match &entry_type {
             FileEntryType::CbmFile(file) => {
                 match file {
-                    CbmFileEntry::ValidFile { blocks, .. } => 
-                        ((*blocks as u64) * 254, 0o444, Some(BufferType::Write)),  // Writable buffer for CBM files
-                    CbmFileEntry::InvalidFile { .. } => 
-                        (0, 0o000, None),
+                    CbmFileEntry::ValidFile { blocks, .. } => {
+                        ((*blocks as u64) * 254, 0o444, Some(BufferType::Write))
+                    } // Writable buffer for CBM files
+                    CbmFileEntry::InvalidFile { .. } => (0, 0o000, None),
                 }
-            },
+            }
             FileEntryType::CbmHeader(_) => (0, 0o444, None),
             FileEntryType::ControlFile(ctrl) => {
                 let (perms, buf_type) = match ctrl.file_type {
                     ControlFileType::Read => (0o444, Some(BufferType::Read)),
                     ControlFileType::Write => (0o222, Some(BufferType::Write)),
-                    ControlFileType::ReadWrite => (0o666, None),  // Will set on first operation
+                    ControlFileType::ReadWrite => (0o666, None), // Will set on first operation
                 };
                 (0, perms, buf_type)
-            },
+            }
         };
 
         FileEntry {
@@ -227,99 +224,91 @@ impl FileEntry {
                         // Buffer the data until we have the complete file
                         // TODO: Add logic to detect when we have complete file
                         self.buffer.as_mut().unwrap().write(data)?;
- 
+
                         // When buffer is complete:
                         // TODO: Convert buffered data to CBM file format
                         // TODO: Write to actual Commodore drive
                         // TODO: Clear buffer after successful write
- 
+
                         Ok(data.len())
-                    },
-                    CbmFileEntry::InvalidFile { .. } => {
-                        Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            "Cannot write to invalid file"
-                        ))
                     }
+                    CbmFileEntry::InvalidFile { .. } => Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Cannot write to invalid file",
+                    )),
                 }
-            },
+            }
             FileEntryType::ControlFile(ctrl) => {
                 match ctrl.purpose {
                     ControlFilePurpose::ExecFormatDrive => {
                         // Format command needs header+id string before executing
                         // TODO: Add logic to detect when we have complete command
                         self.buffer.as_mut().unwrap().write(data)?;
-                        
+
                         // When buffer complete:
                         // TODO: Parse header+id from buffer
                         // TODO: Execute format command on drive
                         // TODO: Clear buffer after format starts
- 
+
                         Ok(data.len())
-                    },
-                    ControlFilePurpose::ExecDriveCommand |
-                    ControlFilePurpose::ExecDirRefresh => {
+                    }
+                    ControlFilePurpose::ExecDriveCommand | ControlFilePurpose::ExecDirRefresh => {
                         // These execute immediately on any write
                         // TODO: Execute command/status/refresh on drive
                         // No need to buffer
- 
+
                         Ok(data.len())
-                    },
-                    ControlFilePurpose::GetCurDriveStatus |
-                    ControlFilePurpose::GetLastDriveStatus |
-                    ControlFilePurpose::GetLastErrorStatus => {
-                        Err(std::io::Error::new(
-                            std::io::ErrorKind::PermissionDenied, 
-                            "Cannot write to status file"
-                        ))
                     }
+                    ControlFilePurpose::GetCurDriveStatus
+                    | ControlFilePurpose::GetLastDriveStatus
+                    | ControlFilePurpose::GetLastErrorStatus => Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "Cannot write to status file",
+                    )),
                 }
-            },
-            FileEntryType::CbmHeader(_) => {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "Cannot write to header"
-                ))
             }
+            FileEntryType::CbmHeader(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Cannot write to header",
+            )),
         }
     }
- }
-
+}
 
 /* some read stuff
 
 
-    match &self.native {
-        FileEntryType::CbmFile(file) => {
-            
-            
-        },
-        FileEntryType::CbmHeader(header) => {
+match &self.native {
+    FileEntryType::CbmFile(file) => {
 
-        }
-        FileEntryType::ControlFile(control) => {
-            if control.file_type == ControlFileType::Write {
-                return Err(FileError::ReadOnly(self.fuse.name));
-            }
-            match control.purpose {
-                ControlFilePurpose::ExecDriveStatus => ,
-                ControlFilePurpose::GetLastDriveStatus => ControlFileType::Read,
-                ControlFilePurpose::GetLastErrorStatus => ControlFileType::Read,
-                ControlFilePurpose::ExecDriveCommand => ControlFileType::ReadWrite,
-                ControlFilePurpose::ExecDirRefresh => ControlFileType::ReadWrite,
-                ControlFilePurpose::ExecFormatDrive => ControlFileType::ReadWrite,
-                    }
-        }
-        match control.file_type {
-            ControlFileType::Read
-            CONT
-            ControlFilePurpose::GetLastDriveStatus => {
-            },
-            ControlFilePurpose::GetLastDriveStatus => {
-            },
-        },
+
+    },
+    FileEntryType::CbmHeader(header) => {
+
     }
+    FileEntryType::ControlFile(control) => {
+        if control.file_type == ControlFileType::Write {
+            return Err(FileError::ReadOnly(self.fuse.name));
+        }
+        match control.purpose {
+            ControlFilePurpose::ExecDriveStatus => ,
+            ControlFilePurpose::GetLastDriveStatus => ControlFileType::Read,
+            ControlFilePurpose::GetLastErrorStatus => ControlFileType::Read,
+            ControlFilePurpose::ExecDriveCommand => ControlFileType::ReadWrite,
+            ControlFilePurpose::ExecDirRefresh => ControlFileType::ReadWrite,
+            ControlFilePurpose::ExecFormatDrive => ControlFileType::ReadWrite,
+                }
+    }
+    match control.file_type {
+        ControlFileType::Read
+        CONT
+        ControlFilePurpose::GetLastDriveStatus => {
+        },
+        ControlFilePurpose::GetLastDriveStatus => {
+        },
+    },
+}
 
 
 
-    */
+*/

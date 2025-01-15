@@ -87,6 +87,7 @@ impl From<CbmError> for MountError {
             }
 
             CbmError::UsbError(message) => MountError::CbmError(message),
+            CbmError::DriverNotOpen => MountError::CbmError(format!("Driver not open")),
 
             CbmError::ParseError { message } => MountError::ValidationError(message),
         }

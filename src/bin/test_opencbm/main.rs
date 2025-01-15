@@ -95,7 +95,7 @@ fn main() -> Result<()> {
                         Err(e) => println!("Error: {}", e),
                     },
 
-                    "u" | "usbreset" | "resetusb" => match cbm.blocking_usb_reset_will_lock() {
+                    "u" | "usbreset" | "resetusb" => match cbm.usb_device_reset() {
                         Ok(()) => println!("USB reset complete"),
                         Err(e) => println!("Error: {}", e),
                     },
@@ -140,7 +140,7 @@ fn main() -> Result<()> {
                                 Ok(num) if (8..=15).contains(&num) => {
                                     println!("Set device number to {}", num);
                                     num
-                                },
+                                }
                                 _ => {
                                     println!("Invalid device number. Must be 8-15");
                                     continue;

@@ -2,10 +2,10 @@ pub use crate::cbmtype::CbmDeviceInfo;
 use crate::cbmtype::{
     CbmDeviceType, CbmError, CbmErrorNumber, CbmErrorNumberOk, CbmFileType, CbmStatus,
 };
-use crate::opencbm::{ascii_to_petscii, petscii_to_ascii, OpenCbm, OpenCbmError};
-use crate::{parse_lsusb_output, parse_usbreset_output, run_command};
+use crate::opencbm::{ascii_to_petscii, petscii_to_ascii, OpenCbm};
 
-use log::{debug, info, trace, warn};
+#[allow(unused_imports)]
+use log::{debug, error, info, trace, warn};
 use parking_lot::Mutex;
 
 use std::collections::HashMap;
@@ -13,10 +13,6 @@ use std::fmt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::thread::sleep;
-use std::time::Duration;
-
-const CBM_DROP_SLEEP_DURATION: Duration = Duration::from_millis(500);
 
 /// Cbm is the object used by applications to access OpenCBM functionality.
 /// It wraps the libopencbm function calls with a rusty level of abstraction.
@@ -26,198 +22,31 @@ pub struct Cbm {
 }
 
 impl Cbm {
-    /// Open the OpenCBM XUM1541 driver and return a CBM object with the 
+    /// Open the OpenCBM XUM1541 driver and return a CBM object with the
     /// driver handle (wrapped with a Mutex to allow multi-threaded operation)
     ///
     /// Processing here is quite complex in order to deal with common driver
     /// error states.
     pub fn new() -> Result<Self, CbmError> {
-        let opencbm = Self::try_initialize_cbm()?;
-        
+        let opencbm = OpenCbm::new()?;
+
         Ok(Self {
             handle: Arc::new(Mutex::new(Some(opencbm))),
         })
     }
-    
-    fn try_initialize_cbm() -> Result<OpenCbm, CbmError> {
-        let mut first_attempt = true;
-        
-        loop {
-            if first_attempt {
-                info!("First attempt at initializing OpenCBM");
-            } else {
-                warn!("Second attempt at initializing OpenCBM");
-            }
-            match Self::attempt_cbm_initialization() {
-                Ok(opencbm) => break Ok(opencbm),
-                Err(e) => {
-                    if !first_attempt {
-                        break Err(e.into());
-                    }
-                    Self::handle_first_attempt_failure()?;
-                    first_attempt = false;
-                }
-            }
+
+    /// This is a risky function.  If it returns CbmError::DriverNotOpen then
+    /// we no longer have the OpenCBM driver open, and may not be able to
+    /// reopen it even with a OpenCbm (or Cbm) ::new().
+    /// In any case, if this function failes with DriverNotOpen it is strongly
+    /// recommended you drop this Cbm and create a new one if this  
+    pub fn usb_device_reset(&mut self) -> Result<(), CbmError> {
+        let mut handle = self.handle.lock();
+        if let Some(h) = handle.as_mut() {
+            h.usb_device_reset().map_err(|e| e.into())
+        } else {
+            Err(CbmError::UsbError("No CBM handle".to_string()))
         }
-    }
-    
-    fn attempt_cbm_initialization() -> Result<OpenCbm, OpenCbmError> {
-        let opencbm = Self::open_cbm_driver()?;
-        
-        if let Err(e) = Self::verify_bus_reset(&opencbm) {
-            sleep(CBM_DROP_SLEEP_DURATION); // Delay before drop to allow USB subsystem time to stabilise
-            return Err(e);
-        }
-    
-        if let Err(e) = Self::verify_device_identification(&opencbm) {
-            sleep(CBM_DROP_SLEEP_DURATION); // Delay before drop to allow USB subsystem time to stabilise
-            return Err(e);
-        }
-        
-        Ok(opencbm)  // Success case - no delay needed
-    }
-    
-    fn verify_bus_reset(opencbm: &OpenCbm) -> Result<(), OpenCbmError> {
-        info!("Resetting bus");
-        match opencbm.reset() {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                warn!("Failed to execute bus reset - driver broken?");
-                Err(e)
-            }
-        }
-    }
-    
-    fn verify_device_identification(opencbm: &OpenCbm) -> Result<(), OpenCbmError> {
-        info!("Attempt a bus operation");
-        match opencbm.identify(8) {
-            Ok(_) => Ok(()),
-            Err(OpenCbmError::UnknownDevice(_)) => {
-                // Try one more time to confirm it's really an unknown device
-                // If the driver is borked this will probaly hit a thread
-                // timeout
-                match opencbm.identify(8) {
-                    Ok(_) => Ok(()),
-                    Err(OpenCbmError::UnknownDevice(_)) => Ok(()), // Confirmed unknown device - this is acceptable
-                    Err(e) => {
-                        warn!("Failed to execute second identify command - driver broken?");
-                        Err(e)
-                    }
-                }
-            }
-            Err(e) => {
-                warn!("Failed to execute identify command - driver broken?");
-                Err(e)
-            }
-        }
-    }
-    
-    fn handle_first_attempt_failure() -> Result<(), CbmError> {
-        warn!("Closing driver and reseting USB device");
-        sleep(CBM_DROP_SLEEP_DURATION);
-        Self::usb_reset()?;
-        sleep(CBM_DROP_SLEEP_DURATION);
-        Ok(())
-    }
-
-    fn open_cbm_driver() -> Result<OpenCbm, OpenCbmError> {
-        info!("Opening OpenCBM driver");
-        let opencbm = OpenCbm::open_driver();
-        match opencbm {
-            Ok(opencbm) => Ok(opencbm),
-            Err(OpenCbmError::ThreadTimeout) => {
-                warn!("Hit FFI timeout opening driver - will reset bus and retry once");
-                // Try resetting the bus and then opening the drive
-                // again
-                Self::usb_reset().map_err(|e| OpenCbmError::Other(format!("USB device reset failed {}", e)))?;
-                // Not sure this is required, but putting in for safety
-                trace!("Sleep for {:?}", CBM_DROP_SLEEP_DURATION);
-                sleep(CBM_DROP_SLEEP_DURATION);
-                OpenCbm::open_driver()
-            },
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    // Only call this function with the opencbm lock already held and with
-    // the opencbm object dropped.  (If it doesn't exist yet, that's OK too).
-    // If you don't have the lock, call blocking_usb_reset_will_lock().
-    fn usb_reset() -> Result<(), CbmError> {
-        // Run lsusb
-        trace!("Run lsusb");
-        let lsusb_output = run_command("lsusb").map_err(|e| {
-            CbmError::UsbError(format!("Failed to run lsusb: {}", e.to_string()))
-        })?;
-
-        // Find the XUM1541's bus ID and device ID
-        trace!("Parse lsusb output: {}", lsusb_output);
-        let (bus, device) = match parse_lsusb_output(&lsusb_output, "16d0", "0504") {
-            Some(x) => x,
-            None => {
-                return Err(CbmError::UsbError(format!(
-                    "Failed to parse lsusb output: {}",
-                    lsusb_output
-                )))
-            }
-        };
-        trace!("xum1541 USB details: bus {} device {}", bus, device);
-
-        trace!("Run usbreset {}/{}", bus, device);
-        let usbreset_output = run_command(format!("usbreset {}/{}", bus, device).as_ref())
-            .map_err(|e| {
-                CbmError::UsbError(format!("Failed to run usbreset {}/{}: {}", bus, device, e))
-            })?;
-
-        trace!("Parse usbreset output: {}", usbreset_output);
-        if !parse_usbreset_output(&usbreset_output, "xum1541", "ok") {
-            return Err(CbmError::UsbError(format!(
-                "Failed to reset xum1541: {}",
-                usbreset_output
-            )));
-        };
-
-        Ok(())
-
-    }
-
-    /// It is recommended to use this function sparingly.  It
-    /// * drops the OpenCBM handle (hence causing cbm_driver_close to be
-    ///   called)
-    /// * pauses to allow that to complete
-    /// * find what bus/device the xum1541 is on, using lsusb
-    /// * performs a USB device reset using usbreset (ubuntu package usbutils)
-    /// * creates a new OpenCBM handle (causing cbm_driver_open to be called)
-    ///   and resets the bus.
-    ///
-    /// If running within tokio use tokio::task::spawn_blocking and run this
-    /// within that.
-    pub fn blocking_usb_reset_will_lock(&mut self) -> Result<(), CbmError> {
-        warn!("Performing USB level reset of xum1541 device");
-        // cbm.lock() section
-        {
-            trace!("Lock cbm.handle");
-            let mut cbm_handle_guard = self.handle.lock();
-            if let Some(handle) = cbm_handle_guard.take() {
-                trace!("Dropping cbm.handle");
-                drop(handle); // Now we're sure we're dropping an actual OpenCbm instance
-            }
-
-            // Not sure this is required, but putting in for safety
-            trace!("Sleep for {:?}", CBM_DROP_SLEEP_DURATION);
-            sleep(CBM_DROP_SLEEP_DURATION);
-
-            Self::usb_reset()?;
-
-            // Not sure this is required, but putting in for safety
-            trace!("Sleep for {:?}", CBM_DROP_SLEEP_DURATION);
-            sleep(CBM_DROP_SLEEP_DURATION);
-
-            // Now recreate the OpenCBM handle
-            let new_cbm = Cbm::new()?;
-            let new_handle = new_cbm.handle.lock().take();
-            *cbm_handle_guard = new_handle;
-        }
-        Ok(())
     }
 
     /// Reset the entire bus

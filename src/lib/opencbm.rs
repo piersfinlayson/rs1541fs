@@ -21,21 +21,32 @@ mod bindings {
 use bindings::*;
 
 use crate::cbmtype::CbmDeviceInfo;
+use crate::{XUM1541_PRODUCT_ID, XUM1541_VENDOR_ID};
+
+#[allow(unused_imports)]
+use log::{debug, error, info, trace, warn};
 
 use libc::intptr_t;
-use log::{debug, error, trace, warn};
 use parking_lot::Mutex;
 use std::error::Error as StdError;
 use std::io::Error;
 use std::io::ErrorKind;
+use std::process::{Command, Output};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
+use std::thread::sleep;
 use std::time::Duration;
+//use libc::{pid_t, SIGKILL};
+//use std::process;
+//use std::os::unix::thread::JoinHandleExt;
+
+pub const OPENCBM_DROP_SLEEP_DURATION: Duration = Duration::from_millis(500);
 
 #[derive(Debug)]
 pub struct OpenCbm {
     handle: intptr_t,
+    driver_opened: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -45,7 +56,9 @@ pub enum OpenCbmError {
     ThreadTimeout,
     ThreadPanic,
     Other(String),
-    FailedCall(i32, String),
+    FailedCall(i32, String), // Perhaps the device queried is not present?
+    UsbError(Option<i32>, String), // We think the drive itself is broken
+    DriverNotOpen(),
 }
 
 impl From<std::io::Error> for OpenCbmError {
@@ -71,6 +84,8 @@ impl std::fmt::Display for OpenCbmError {
             OpenCbmError::ThreadPanic => write!(f, "FFI call thread panicked"),
             OpenCbmError::Other(e) => write!(f, "{}", e),
             OpenCbmError::FailedCall(rc, func) => write!(f, "{} {}", func, rc),
+            OpenCbmError::UsbError(rc, func) => write!(f, "{} {:?}", func, rc),
+            OpenCbmError::DriverNotOpen() => write!(f, "Driver not open"),
         }
     }
 }
@@ -84,6 +99,8 @@ impl StdError for OpenCbmError {
             OpenCbmError::ThreadPanic => None,
             OpenCbmError::Other(_) => None,
             OpenCbmError::FailedCall(_, _) => None,
+            OpenCbmError::UsbError(_, _) => None,
+            OpenCbmError::DriverNotOpen() => None,
         }
     }
 }
@@ -128,17 +145,20 @@ macro_rules! opencbm_thread_timeout {
             let _ = tx.send(result);
         });
 
-        match rx.recv_timeout(Duration::from_millis($timeout_ms)) {
-            Ok(result) => {
-                // Wait for thread to finish to ensure cleanup
-                match thread_handle.join() {
-                    Ok(_) => result,
-                    Err(_) => Err(OpenCbmError::ThreadPanic),
-                }
-            }
+        match rx.recv_timeout(Duration::from_millis(10000)) {
+            Ok(result) => match thread_handle.join() {
+                Ok(_) => result,
+                Err(_) => Err(OpenCbmError::ThreadPanic),
+            },
             Err(_) => {
-                // Thread is likely blocked in FFI call
-                warn!("Caught timeout in opencbm FFI call");
+                // Get process and thread IDs and send SIGKILL to specific thread
+                //unsafe {
+                //    let process_id: pid_t = process::id() as pid_t;
+                //    let thread_id: pid_t = thread_handle.as_pthread_t() as pid_t;
+                //    tgkill(process_id, thread_id, SIGKILL);
+                //}
+
+                warn!("Hanging thread due to timeout in opencbm FFI call");
                 Err(OpenCbmError::ThreadTimeout)
             }
         }
@@ -150,6 +170,10 @@ macro_rules! opencbm_thread_timeout {
 /// Provides safe access to Cbm operations and ensures proper
 /// synchronization when accessing the hardware bus.
 impl OpenCbm {
+    pub fn new() -> Result<Self, OpenCbmError> {
+        try_initialize_cbm()
+    }
+
     pub fn open_driver() -> Result<OpenCbm, OpenCbmError> {
         trace!("OpenCbm: Entered open_driver");
         let handle = Arc::new(Mutex::new(0 as intptr_t));
@@ -157,7 +181,7 @@ impl OpenCbm {
 
         // This resets the bus if required, so may take a little time
         let result = Ok(OpenCbm {
-            handle: opencbm_thread_timeout!(5000, {
+            handle: opencbm_thread_timeout!(10000, {
                 let mut handle_guard = handle_clone.lock();
                 let adapter: *mut i8 = std::ptr::null_mut();
 
@@ -169,6 +193,7 @@ impl OpenCbm {
                     Err(e) => Err(e),
                 }
             })?,
+            driver_opened: true,
         });
 
         trace!("OpenCbm: Exited open_driver {:?}", result);
@@ -185,7 +210,8 @@ impl OpenCbm {
 
         let handle = self.handle; // Clone because we need to move it to the thread
 
-        let result = opencbm_thread_timeout!(2500, { opencbm_retry!(cbm_reset(handle), "cbm_reset") });
+        let result =
+            opencbm_thread_timeout!(2500, { opencbm_retry!(cbm_reset(handle), "cbm_reset") });
         trace!("OpenCbm: Exited reset {:?}", result);
         result
     }
@@ -196,7 +222,7 @@ impl OpenCbm {
         self.handle = 0;
 
         // This seems to take a little time as well
-        let result = opencbm_thread_timeout!(5000, {
+        let result = opencbm_thread_timeout!(10000, {
             debug!("Calling: cbm_driver_close");
             unsafe { cbm_driver_close(handle) };
             debug!("Returned: cbm_driver_close");
@@ -234,11 +260,10 @@ impl OpenCbm {
             filename
         );
         let handle = self.handle;
-        // Create owned copy of the bytes to ensure they live through the C call
         let filename_bytes = ascii_to_petscii(filename);
         trace!("Open petscii filename: {:?}", filename_bytes);
 
-        let result = opencbm_thread_timeout!(5000, {
+        let result = opencbm_thread_timeout!(10000, {
             match unsafe {
                 cbm_open(
                     handle,
@@ -249,7 +274,7 @@ impl OpenCbm {
                 )
             } {
                 0 => Ok(()),
-                e => Err(OpenCbmError::FailedCall(e, "open_file".to_string())),
+                e => Err(OpenCbmError::UsbError(Some(e), "open_file".to_string())),
             }
         });
         trace!("OpenCbm: Exited open_file {:?}", result);
@@ -272,10 +297,10 @@ impl OpenCbm {
         );
         let handle = self.handle;
 
-        let result = opencbm_thread_timeout!(5000, {
+        let result = opencbm_thread_timeout!(10000, {
             match unsafe { cbm_close(handle, device, secondary_address) } {
                 0 => Ok(()),
-                e => Err(OpenCbmError::FailedCall(e, "close_file".to_string())),
+                e => Err(OpenCbmError::UsbError(Some(e), "close_file".to_string())),
             }
         });
         trace!("OpenCbm: Exited close_file");
@@ -286,7 +311,7 @@ impl OpenCbm {
         trace!("OpenCbm: Entered identify {}", device);
         let handle = self.handle; // Clone because we need to move it to the thread
 
-        opencbm_thread_timeout!(5000, {
+        opencbm_thread_timeout!(10000, {
             let mut device_type: cbm_device_type_e = Default::default();
             let mut description: *const libc::c_char = std::ptr::null();
 
@@ -331,7 +356,7 @@ impl OpenCbm {
         let handle = self.handle;
         let mut buf = vec![0; size];
 
-        let result = opencbm_thread_timeout!(5000, {
+        let result = opencbm_thread_timeout!(10000, {
             let result = unsafe {
                 cbm_raw_read(
                     handle,
@@ -358,7 +383,7 @@ impl OpenCbm {
         let handle = self.handle;
         let buf = data.to_vec(); // Create owned copy
 
-        let result = opencbm_thread_timeout!(5000, {
+        let result = opencbm_thread_timeout!(10000, {
             let result = unsafe {
                 cbm_raw_write(
                     handle,
@@ -384,11 +409,11 @@ impl OpenCbm {
         trace!("OpenCbm: Entered listen {} {}", device, secondary_address);
         let handle = self.handle;
 
-        let result = opencbm_thread_timeout!(5000, {
+        let result = opencbm_thread_timeout!(10000, {
             let result = unsafe { cbm_listen(handle, device, secondary_address) };
             match result {
                 0 => Ok(()),
-                e => Err(OpenCbmError::FailedCall(e, "cbm_listen".to_string())),
+                e => Err(OpenCbmError::UsbError(Some(e), "cbm_listen".to_string())),
             }
         });
         trace!("OpenCbm: Exited listen {:?}", result);
@@ -400,10 +425,10 @@ impl OpenCbm {
         trace!("OpenCbm: Entered talk {} {}", device, secondary_address);
         let handle = self.handle;
 
-        let result = opencbm_thread_timeout!(5000, {
+        let result = opencbm_thread_timeout!(10000, {
             match unsafe { cbm_talk(handle, device, secondary_address) } {
                 0 => Ok(()),
-                e => Err(OpenCbmError::FailedCall(e, "talk".to_string())),
+                e => Err(OpenCbmError::UsbError(Some(e), "talk".to_string())),
             }
         });
         trace!("OpenCbm: Exited talk {:?}", result);
@@ -415,10 +440,10 @@ impl OpenCbm {
         trace!("OpenCbm: Entered unlisten");
         let handle = self.handle;
 
-        let result = opencbm_thread_timeout!(5000, {
+        let result = opencbm_thread_timeout!(10000, {
             match unsafe { cbm_unlisten(handle) } {
                 0 => Ok(()),
-                e => Err(OpenCbmError::FailedCall(e, "unlisten".to_string())),
+                e => Err(OpenCbmError::UsbError(Some(e), "unlisten".to_string())),
             }
         });
         trace!("OpenCbm: Exited unlisten: {:?}", result);
@@ -430,10 +455,10 @@ impl OpenCbm {
         trace!("OpenCbm: Entered untalk");
         let handle = self.handle;
 
-        let result = opencbm_thread_timeout!(5000, {
+        let result = opencbm_thread_timeout!(10000, {
             match unsafe { cbm_untalk(handle) } {
                 0 => Ok(()),
-                e => Err(OpenCbmError::FailedCall(e, "untalk".to_string())),
+                e => Err(OpenCbmError::UsbError(Some(e), "untalk".to_string())),
             }
         });
         trace!("OpenCbm: Exited untalk: {:?}", result);
@@ -453,7 +478,7 @@ impl OpenCbm {
             buf.set_len(256);
         }
 
-        let result = opencbm_thread_timeout!(5000, {
+        let result = opencbm_thread_timeout!(10000, {
             let result = unsafe {
                 cbm_device_status(
                     handle,
@@ -462,10 +487,74 @@ impl OpenCbm {
                     buf.len(),
                 )
             };
-            Ok((buf, result))
+            if result >= 0 {
+                if buf.len() > 0 {
+                    warn!("OK from cbm_device_status {} {:?}", result, buf);
+                    Ok((buf, result))
+                } else {
+                    warn!("Failed call cbm_device_status");
+                    Err(OpenCbmError::FailedCall(0, "cbm_device_status".to_string()))
+                }
+            } else {
+                // Something within cbm_device_status returned < 0 - that
+                // suggests a USB device error
+                warn!("USB Error in cbm_device_status");
+                Err(OpenCbmError::UsbError(
+                    Some(result),
+                    "cbm_device_status".to_string(),
+                ))
+            }
         });
         trace!("OpenCbm: Exited device_status {:?}", result);
         result
+    }
+
+    /// Resets the USB device.  Obviously must be called with lock held, and
+    /// this fn may change the handle within this instance.
+    /// If this function fails you will have a non-functional OpenCbm object
+    /// and must drop it.
+    /// You will want to attempt to create a new one, but as we failed to
+    /// you may struggle.
+    pub fn usb_device_reset(&mut self) -> Result<(), OpenCbmError> {
+        // Close the driver
+        let result = self.close_driver();
+        self.driver_opened = false;
+        self.handle = 0;
+        result?;
+
+        // Pause to give the USB subsystem time to process that
+        sleep(OPENCBM_DROP_SLEEP_DURATION);
+
+        // Try and reset the USB device
+        usb_reset()?;
+
+        // Pause to give the USB subsystem time to process that
+        sleep(OPENCBM_DROP_SLEEP_DURATION);
+
+        // This returns an OpenCbm object.  If we drop it driver_close() will
+        // be called with the handle it returns.  self.into_raw_values()
+        // forgets the object and returns us the handle.  This way the caller
+        // retains the same OpenCbm object, but gets a new handle
+        let opencbm_new = try_initialize_cbm()?;
+        (self.handle, self.driver_opened) = opencbm_new.into_raw_values();
+        self.driver_opened = true;
+        Ok(())
+    }
+
+    fn into_raw_values(self) -> (intptr_t, bool) {
+        let handle = self.handle;
+        let driver_opened = self.driver_opened;
+        std::mem::forget(self); // Prevents Drop from running
+        (handle, driver_opened)
+    }
+}
+
+impl Drop for OpenCbm {
+    fn drop(&mut self) {
+        if let Err(e) = self.close_driver() {
+            error!("Error closing CBM device: {}", e);
+        }
+        self.driver_opened = false;
     }
 }
 
@@ -527,10 +616,216 @@ pub fn petscii_to_ascii(input: &[u8]) -> String {
     }
 }
 
-impl Drop for OpenCbm {
-    fn drop(&mut self) {
-        if let Err(e) = self.close_driver() {
-            error!("Error closing CBM device: {}", e);
+// Function to run a command and capture its output as a String
+fn run_command(command: &str) -> Result<Output, std::io::Error> {
+    Command::new("sh").arg("-c").arg(command).output()
+}
+
+// Function to parse the output of lsusb and find the device path
+fn parse_lsusb_output(output: &str, vendor_id: &str, product_id: &str) -> Option<(String, String)> {
+    for line in output.lines() {
+        if let Some(id_part) = line.split("ID ").nth(1) {
+            if let Some(id_str) = id_part.split_whitespace().next() {
+                let id_parts: Vec<&str> = id_str.split(':').collect();
+                if id_parts.len() == 2 && id_parts[0] == vendor_id && id_parts[1] == product_id {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 4 {
+                        let bus = parts[1].to_string();
+                        let device = parts[3].trim_end_matches(':').to_string();
+                        return Some((bus, device));
+                    }
+                }
+            }
         }
+    }
+    None
+}
+
+// Function to parse the output of usbreset and check for the specified device and success message
+fn parse_usbreset_output(output: &str, device_type: &str, success_message: &str) -> bool {
+    output
+        .lines()
+        .any(|line| line.contains(device_type) && line.contains(success_message))
+}
+
+fn run_lsusb() -> Result<String, OpenCbmError> {
+    // Run lsusb
+    trace!("Run lsusb");
+    let lsusb_output = run_command("lsusb")
+        .inspect_err(|e| warn!("Failed to run lsusb: {}", e.to_string()))
+        .map_err(|e| {
+            OpenCbmError::UsbError(
+                e.raw_os_error(),
+                format!("Failed to run lsusb: {}", e.to_string()),
+            )
+        })?;
+    let stderr = String::from_utf8_lossy(&lsusb_output.stderr).to_string();
+    let stdout = String::from_utf8_lossy(&lsusb_output.stdout).to_string();
+    match lsusb_output.status.code() {
+        Some(0) => trace!("Successfully ran lsusb"),
+        code => {
+            warn!("Failed to run lsusb: {}", stderr);
+            return Err(OpenCbmError::UsbError(
+                code,
+                format!("Failed to run lsusb: {}", stderr),
+            ));
+        }
+    }
+    Ok(stdout)
+}
+
+fn get_xum1541_bus_device_id(stdout: &str) -> Result<(String, String), OpenCbmError> {
+    // Find the XUM1541's bus ID and device ID
+    trace!("Parse lsusb stdout output: {}", stdout);
+    let (bus, device) = match parse_lsusb_output(&stdout, XUM1541_VENDOR_ID, XUM1541_PRODUCT_ID) {
+        Some(x) => x,
+        None => {
+            return Err(OpenCbmError::UsbError(
+                None,
+                format!("Failed to parse lsusb output: {}", stdout),
+            ))
+        }
+    };
+    trace!("xum1541 USB details: bus {} device {}", bus, device);
+    Ok((bus, device))
+}
+
+fn run_usbreset(bus: &str, device: &str) -> Result<(), OpenCbmError> {
+    let cmd = format!("usbreset {}/{}", bus, device);
+    trace!("Run {}", cmd);
+
+    let command_output = run_command(&cmd)
+        .inspect_err(|e| warn!("Failed to run {}: {}", cmd, e.to_string()))
+        .map_err(|e| {
+            OpenCbmError::UsbError(
+                e.raw_os_error(),
+                format!("Failed to run {}: {}", cmd, e.to_string()),
+            )
+        })?;
+
+    let stderr = String::from_utf8_lossy(&command_output.stderr).to_string();
+    let stdout = String::from_utf8_lossy(&command_output.stdout).to_string();
+
+    match command_output.status.code() {
+        Some(0) => {
+            trace!("Successfully ran {}", cmd);
+            if !parse_usbreset_output(&stdout, "xum1541", "ok") {
+                return Err(OpenCbmError::UsbError(
+                    None,
+                    format!("Failed to reset xum1541: {}", stdout),
+                ));
+            }
+            Ok(())
+        }
+        code => {
+            warn!("Failed to run {}: {}", cmd, stderr);
+            Err(OpenCbmError::UsbError(
+                code,
+                format!("Failed to run {}: {}", cmd, stderr),
+            ))
+        }
+    }
+}
+
+// This can only validly be used outside the scope of OpenCbm, otherwise
+// it's going to invalidate the current handle inside OpenCbm
+fn usb_reset() -> Result<(), OpenCbmError> {
+    let lsusb_stdout = run_lsusb()?;
+    let (bus, device) = get_xum1541_bus_device_id(&lsusb_stdout)?;
+    run_usbreset(&bus, &device)
+}
+
+fn try_initialize_cbm() -> Result<OpenCbm, OpenCbmError> {
+    let mut first_attempt = true;
+
+    loop {
+        if first_attempt {
+            info!("First attempt at initializing OpenCBM");
+        } else {
+            warn!("Second attempt at initializing OpenCBM");
+        }
+        match attempt_cbm_initialization() {
+            Ok(opencbm) => break Ok(opencbm),
+            Err(e) => {
+                if !first_attempt {
+                    break Err(e.into());
+                }
+                handle_first_attempt_failure()?;
+                first_attempt = false;
+            }
+        }
+    }
+}
+
+fn attempt_cbm_initialization() -> Result<OpenCbm, OpenCbmError> {
+    let opencbm = open_cbm_driver()?;
+
+    if let Err(e) = verify_bus_reset(&opencbm) {
+        // Pause to allow OpenCbm to be dropped (and driver clsed)
+        sleep(OPENCBM_DROP_SLEEP_DURATION);
+        return Err(e);
+    }
+
+    if let Err(e) = verify_device_identification(&opencbm) {
+        return Err(e);
+    }
+
+    Ok(opencbm) // Success case - no delay needed
+}
+
+fn verify_bus_reset(opencbm: &OpenCbm) -> Result<(), OpenCbmError> {
+    info!("Resetting bus");
+    match opencbm.reset() {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            warn!("Failed to execute bus reset - driver broken?");
+            Err(e)
+        }
+    }
+}
+
+fn verify_device_identification(opencbm: &OpenCbm) -> Result<(), OpenCbmError> {
+    info!("Attempt a bus operation");
+    match opencbm.device_status(8) {
+        Ok(_) => Ok(()),
+        Err(e @ OpenCbmError::UsbError { .. }) => {
+            warn!("Failed bus operation - driver broken");
+            Err(e)
+        }
+        Err(e) => {
+            warn!(
+                "Failed but in a way that suggests the driver is working {}",
+                e
+            );
+            Ok(())
+        }
+    }
+}
+
+fn handle_first_attempt_failure() -> Result<(), OpenCbmError> {
+    warn!("Closing driver and reseting USB device");
+    sleep(OPENCBM_DROP_SLEEP_DURATION);
+    usb_reset()?;
+    sleep(OPENCBM_DROP_SLEEP_DURATION);
+    Ok(())
+}
+
+fn open_cbm_driver() -> Result<OpenCbm, OpenCbmError> {
+    info!("Opening OpenCBM driver");
+    let opencbm = OpenCbm::open_driver();
+    match opencbm {
+        Ok(opencbm) => Ok(opencbm),
+        Err(OpenCbmError::ThreadTimeout) => {
+            warn!("Hit FFI timeout opening driver - will reset bus and retry once");
+            // Try resetting the bus and then opening the drive
+            // again
+            usb_reset()
+                .map_err(|e| OpenCbmError::Other(format!("USB device reset failed {}", e)))?;
+            // Not sure this is required, but putting in for safety
+            trace!("Sleep for {:?}", OPENCBM_DROP_SLEEP_DURATION);
+            sleep(OPENCBM_DROP_SLEEP_DURATION);
+            OpenCbm::open_driver()
+        }
+        Err(e) => Err(e.into()),
     }
 }
