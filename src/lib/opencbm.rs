@@ -487,9 +487,10 @@ impl OpenCbm {
                     buf.len(),
                 )
             };
-            if result >= 0 {
+            // 99 is a special OpenCbm error status
+            if result >= 0 && result < 99 {
                 if buf.len() > 0 {
-                    warn!("OK from cbm_device_status {} {:?}", result, buf);
+                    trace!("OK from cbm_device_status {} {:?}", result, buf);
                     Ok((buf, result))
                 } else {
                     warn!("Failed call cbm_device_status");
@@ -497,7 +498,8 @@ impl OpenCbm {
                 }
             } else {
                 // Something within cbm_device_status returned < 0 - that
-                // suggests a USB device error
+                // suggests a USB device error or a device not present error
+                // We have no way of disambiguating
                 warn!("USB Error in cbm_device_status");
                 Err(OpenCbmError::UsbError(
                     Some(result),
