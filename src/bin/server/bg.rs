@@ -1,7 +1,7 @@
 /// Background processing - provides a single worker thread which handles IPC
 /// and background tasks on behalf of Mounts
-use rs1541fs::cbm::{Cbm, CbmDeviceInfo, CbmDriveUnit};
-use rs1541fs::cbmtype::{CbmError, CbmStatus};
+use rs1541::{Cbm, CbmDeviceInfo, CbmDriveUnit};
+use rs1541::{CbmError, CbmStatus};
 
 use crate::drivemgr::{DriveError, DriveManager};
 use crate::locking_section;
@@ -469,7 +469,7 @@ impl From<CbmError> for OpError {
                 OpError::HardwareError(msg)
             }
 
-            CbmError::FuseError(errno) => OpError::HardwareError(format!("FUSE error: {}", errno)),
+            CbmError::Errno(errno) => OpError::HardwareError(format!("FUSE error: {}", errno)),
 
             CbmError::ValidationError(msg) => OpError::ValidationError(msg),
             CbmError::UsbError(msg) => OpError::HardwareError(msg),

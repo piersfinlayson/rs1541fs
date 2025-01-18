@@ -12,7 +12,7 @@ mod signal;
 use args::Args;
 use daemon::Daemon;
 use error::DaemonError;
-use rs1541fs::cbm::Cbm;
+use rs1541::Cbm;
 use rs1541fs::ipc::DAEMON_PID_FILENAME;
 use rs1541fs::logging::init_logging;
 

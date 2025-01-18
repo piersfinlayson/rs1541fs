@@ -1,6 +1,7 @@
-use rs1541fs::cbm::{Cbm, CbmDriveUnit};
-use rs1541fs::cbmtype::{CbmError, CbmErrorNumber};
-use rs1541fs::validate::{validate_device, validate_mountpoint, DeviceValidation, ValidationType};
+use rs1541::{Cbm, CbmDriveUnit};
+use rs1541::{CbmError, CbmErrorNumber};
+use rs1541fs::validate::{validate_mountpoint, ValidationType};
+use rs1541::{validate_device, DeviceValidation}; 
 
 use crate::args::get_args;
 use crate::bg::{OpError, Operation};
@@ -80,7 +81,7 @@ impl From<CbmError> for MountError {
                 MountError::CbmError(msg)
             }
 
-            CbmError::FuseError(errno) => MountError::CbmError(format!("FUSE error: {}", errno)),
+            CbmError::Errno(errno) => MountError::CbmError(format!("FUSE error: {}", errno)),
 
             CbmError::ValidationError(message) => {
                 MountError::CbmError(format!("Validation error: {}", message))

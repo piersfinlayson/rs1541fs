@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 
-use rs1541fs::cbm::{Cbm, CbmDiskHeader, CbmFileEntry};
+use rs1541::{CbmDiskHeader, CbmFileEntry};
 use std::time::SystemTime;
 use thiserror::Error;
 
@@ -215,7 +215,7 @@ impl FileEntry {
     /// offset: Position in file to write (from FUSE)
     /// data: Bytes to write (from FUSE)
     /// Returns: Number of bytes written or error
-    pub fn write(&mut self, offset: u64, data: &[u8]) -> Result<usize, std::io::Error> {
+    pub fn write(&mut self, _offset: u64, data: &[u8]) -> Result<usize, std::io::Error> {
         match &mut self.native {
             FileEntryType::CbmFile(file) => {
                 match file {

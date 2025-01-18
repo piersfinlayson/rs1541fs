@@ -1,4 +1,4 @@
-use rs1541fs::cbmtype::CbmError;
+use rs1541::CbmError;
 use rs1541fs::ipc::Response;
 
 use crate::mount::MountError;

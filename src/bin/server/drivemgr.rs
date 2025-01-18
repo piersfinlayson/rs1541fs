@@ -1,6 +1,6 @@
-use rs1541fs::cbm::{Cbm, CbmDeviceInfo, CbmDriveUnit};
-use rs1541fs::cbmtype::{CbmError, CbmErrorNumber, CbmStatus};
-use rs1541fs::{MAX_DEVICE_NUM, MIN_DEVICE_NUM};
+use rs1541::{Cbm, CbmDeviceInfo, CbmDriveUnit};
+use rs1541::{CbmError, CbmErrorNumber, CbmStatus};
+use rs1541::{MAX_DEVICE_NUM, MIN_DEVICE_NUM};
 
 use crate::locking_section;
 
@@ -71,7 +71,7 @@ impl From<CbmError> for DriveError {
                 DriveError::OpenCbmError(device.unwrap_or_default(), error.to_string())
             }
 
-            CbmError::FuseError(errno) => {
+            CbmError::Errno(errno) => {
                 DriveError::BusError(format!("FUSE error: errno {}", errno))
             }
 

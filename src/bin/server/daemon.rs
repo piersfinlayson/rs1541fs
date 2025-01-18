@@ -1,4 +1,4 @@
-use rs1541fs::cbm::Cbm;
+use rs1541::Cbm;
 
 use crate::bg::{OpResponse, Operation, Proc, MAX_BG_CHANNELS};
 use crate::drivemgr::DriveManager;

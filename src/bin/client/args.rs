@@ -1,4 +1,5 @@
-use rs1541fs::validate::{validate_device, validate_mountpoint, DeviceValidation, ValidationType};
+use rs1541fs::validate::{validate_mountpoint, ValidationType};
+use rs1541::{validate_device, DeviceValidation}; 
 
 use crate::error::ClientError;
 
@@ -197,7 +198,7 @@ impl Args {
 mod tests {
     use crate::args::{Args, ClientOperation};
     use crate::error::ClientError;
-    use rs1541fs::{DEFAULT_DEVICE_NUM, MAX_DEVICE_NUM, MIN_DEVICE_NUM};
+    use rs1541::{DEFAULT_DEVICE_NUM, MAX_DEVICE_NUM, MIN_DEVICE_NUM};
     use tempfile::TempDir;
 
     // Helper function to create a temporary directory for mount point tests

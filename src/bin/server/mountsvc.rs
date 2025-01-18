@@ -3,7 +3,7 @@ use crate::drivemgr::{DriveError, DriveManager};
 use crate::locking_section;
 use crate::mount::{Mount, MountError};
 
-use rs1541fs::cbm::Cbm;
+use rs1541::Cbm;
 
 use log::{debug, info, trace, warn};
 use std::collections::HashMap;
