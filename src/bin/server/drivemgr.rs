@@ -1,89 +1,12 @@
-use rs1541::{Cbm, CbmDeviceInfo, CbmDriveUnit};
-use rs1541::{CbmError, CbmErrorNumber, CbmStatus};
-use rs1541::{MAX_DEVICE_NUM, MIN_DEVICE_NUM};
-
 use crate::locking_section;
+use fs1541::error::{Error, Fs1541Error};
+use rs1541::{Cbm, CbmDeviceInfo, CbmDriveUnit, CbmStatus, Rs1541ErrorNumber};
+use rs1541::{MAX_DEVICE_NUM, MIN_DEVICE_NUM};
 
 use log::{debug, error, info, trace, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
-use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
-
-#[derive(Error, Debug)]
-pub enum DriveError {
-    #[error("Drive {0} already exists")]
-    DriveExists(u8),
-    #[error("Drive {0} not found")]
-    DriveNotFound(u8),
-    #[error("Invalid device number {0} (must be 0-31)")]
-    InvalidDeviceNumber(u8),
-    #[error("Drive {0} initialization failed: {1}")]
-    InitializationError(u8, String),
-    #[error("Bus operation failed: {0}")]
-    BusError(String),
-    #[error("Operation timeout {0}")]
-    Timeout(u8),
-    #[error("Drive {0} is not responding: {1}")]
-    DriveNotResponding(u8, String),
-    #[error("Drive {0} reports error: {1}")]
-    DriveError(u8, String),
-    #[error("Drive {0} is busy")]
-    DriveBusy(u8),
-    #[error("Invalid drive state: {1} device {0}")]
-    InvalidState(u8, String),
-    #[error("OpenCBM error: device number {0} error {1}")]
-    OpenCbmError(u8, String),
-    #[error("Other error: {0} {1}")]
-    OtherError(u8, String),
-}
-
-impl From<CbmError> for DriveError {
-    fn from(error: CbmError) -> Self {
-        match error {
-            CbmError::DeviceError { device, message } => {
-                DriveError::DriveNotResponding(device, message)
-            }
-
-            CbmError::ChannelError { device, message } => {
-                DriveError::DriveError(device, format!("Channel error: {}", message))
-            }
-
-            CbmError::FileError { device, message } => {
-                DriveError::DriveError(device, format!("File error: {}", message))
-            }
-
-            CbmError::CommandError { device, message } => {
-                DriveError::DriveError(device, format!("Command error: {}", message))
-            }
-
-            CbmError::StatusError { device, status } => {
-                DriveError::DriveError(device, status.to_string())
-            }
-
-            CbmError::TimeoutError { device } => DriveError::Timeout(device),
-
-            CbmError::InvalidOperation { device, message } => {
-                DriveError::InvalidState(device, message)
-            }
-
-            CbmError::OpenCbmError { device, error } => {
-                DriveError::OpenCbmError(device.unwrap_or_default(), error.to_string())
-            }
-
-            CbmError::Errno(errno) => {
-                DriveError::BusError(format!("FUSE error: errno {}", errno))
-            }
-
-            CbmError::ValidationError(message) => DriveError::InvalidState(0, message),
-
-            CbmError::UsbError(message) => DriveError::OpenCbmError(0, message),
-            CbmError::DriverNotOpen => DriveError::OpenCbmError(0, format!("Driver not open")),
-
-            CbmError::ParseError { message } => DriveError::OtherError(0, message),
-        }
-    }
-}
 
 /// DriveManager is used by bg::Proc to access the disk drives.
 ///
@@ -106,10 +29,7 @@ impl DriveManager {
     }
 
     /// Add a new drive to the manager
-    pub async fn add_drive(
-        &self,
-        device_number: u8,
-    ) -> Result<Arc<RwLock<CbmDriveUnit>>, DriveError> {
+    pub async fn add_drive(&self, device_number: u8) -> Result<Arc<RwLock<CbmDriveUnit>>, Error> {
         info!("Adding drive with device number {}", device_number);
 
         // Validate device number
@@ -118,7 +38,13 @@ impl DriveManager {
                 "Invalid device number {} (must be {}-{})",
                 device_number, MIN_DEVICE_NUM, MAX_DEVICE_NUM
             );
-            return Err(DriveError::InvalidDeviceNumber(device_number));
+            return Err(Error::Fs1541 {
+                message: format!("Invalid device number {}", device_number),
+                error: Fs1541Error::Validation(format!(
+                    "Device number must be {}-{}",
+                    MIN_DEVICE_NUM, MAX_DEVICE_NUM
+                )),
+            });
         }
 
         // Check whether drive exists
@@ -126,14 +52,20 @@ impl DriveManager {
             let drives = self.drives.read().await;
             if drives.contains_key(&device_number) {
                 info!("Drive {} already exists", device_number);
-                return Err(DriveError::DriveExists(device_number));
+                return Err(Error::Fs1541 {
+                    message: format!("Drive {} already exists", device_number),
+                    error: Fs1541Error::Validation("Drive already exists".to_string()),
+                });
             }
         });
 
         // Identify the drive
         let info = locking_section!("Lock", "Cbm", {
             let cbm = self.cbm.lock().await;
-            let info = cbm.identify(device_number)?;
+            let info = cbm.identify(device_number).map_err(|e| Error::Rs1541 {
+                message: format!("Failed to identify drive {}", device_number),
+                error: e,
+            })?;
             trace!("Drive info: {:?}", info);
             info
         });
@@ -150,7 +82,10 @@ impl DriveManager {
                         "Drive already present, but when we checked earlier it wasn't {}",
                         device_number
                     );
-                    Err(DriveError::DriveExists(device_number))
+                    Err(Error::Fs1541 {
+                        message: format!("Drive {} already exists", device_number),
+                        error: Fs1541Error::Internal("Race condition detected".to_string()),
+                    })
                 }
                 None => Ok(drive_unit_clone),
             }
@@ -158,10 +93,8 @@ impl DriveManager {
     }
 
     /// Remove a drive from the manager
-    pub async fn remove_drive(&self, device_number: u8) -> Result<(), DriveError> {
+    pub async fn remove_drive(&self, device_number: u8) -> Result<(), Error> {
         info!("Attempting to remove drive {}", device_number);
-
-        // We don't need to lock the bus to remove a drive
 
         let drive = locking_section!("Read", "Drives", {
             let drives = self.drives.read().await;
@@ -169,7 +102,10 @@ impl DriveManager {
                 Some(drive) => drive,
                 None => {
                     warn!("Attempted to remove non-existent drive {}", device_number);
-                    return Err(DriveError::DriveNotFound(device_number));
+                    return Err(Error::Fs1541 {
+                        message: format!("Drive {} not found", device_number),
+                        error: Fs1541Error::Validation("Drive does not exist".to_string()),
+                    });
                 }
             }
             .clone()
@@ -179,7 +115,10 @@ impl DriveManager {
             let drive = drive.read();
             if drive.await.is_busy() {
                 warn!("Cannot remove drive {} - drive is busy", device_number);
-                return Err(DriveError::DriveBusy(device_number));
+                return Err(Error::Fs1541 {
+                    message: format!("Drive {} is busy", device_number),
+                    error: Fs1541Error::Operation("Drive is busy".to_string()),
+                });
             }
         });
 
@@ -192,10 +131,7 @@ impl DriveManager {
 
     /// Get a reference to a drive
     #[allow(dead_code)]
-    pub async fn get_drive(
-        &self,
-        device_number: u8,
-    ) -> Result<Arc<RwLock<CbmDriveUnit>>, DriveError> {
+    pub async fn get_drive(&self, device_number: u8) -> Result<Arc<RwLock<CbmDriveUnit>>, Error> {
         trace!("Getting reference to drive {}", device_number);
         locking_section!("Read", "Drives", {
             match self.drives.read().await.get(&device_number) {
@@ -205,13 +141,16 @@ impl DriveManager {
                 }
                 None => {
                     debug!("Drive {} not found", device_number);
-                    Err(DriveError::DriveNotFound(device_number))
+                    Err(Error::Fs1541 {
+                        message: format!("Drive {} not found", device_number),
+                        error: Fs1541Error::Validation("Drive does not exist".to_string()),
+                    })
                 }
             }
         })
     }
 
-    pub async fn identify_drive(&self, device_number: u8) -> Result<CbmDeviceInfo, DriveError> {
+    pub async fn identify_drive(&self, device_number: u8) -> Result<CbmDeviceInfo, Error> {
         locking_section!("Lock", "Cbm", {
             let guard = self.cbm.lock().await;
             guard
@@ -223,11 +162,14 @@ impl DriveManager {
                         info.description
                     )
                 })
-                .map_err(|e| DriveError::from(e))
+                .map_err(|e| Error::Rs1541 {
+                    message: format!("Failed to identify drive {}", device_number),
+                    error: e,
+                })
         })
     }
 
-    pub async fn get_drive_status(&self, device_number: u8) -> Result<CbmStatus, DriveError> {
+    pub async fn get_drive_status(&self, device_number: u8) -> Result<CbmStatus, Error> {
         locking_section!("Lock", "Cbm", {
             let guard = self.cbm.lock().await;
             guard
@@ -235,41 +177,56 @@ impl DriveManager {
                 .inspect(|status| {
                     debug!("Status retrieved for device {} {}", device_number, status)
                 })
-                .map_err(|e| DriveError::from(e))
+                .map_err(|e| Error::Rs1541 {
+                    message: format!("Failed to get status for drive {}", device_number),
+                    error: e,
+                })
         })
     }
 
     pub async fn init_drive(
         &self,
         device_number: u8,
-        ignore: &Vec<CbmErrorNumber>,
-    ) -> Result<Vec<CbmStatus>, DriveError> {
+        ignore: &Vec<Rs1541ErrorNumber>,
+    ) -> Result<Vec<Result<CbmStatus, Error>>, Error> {
         locking_section!("Lock", "Cbm and Drive Manager", {
-            let cbm = self.cbm.lock().await.clone();
+            let mut cbm = self.cbm.lock().await.clone();
             let drive = self.get_drive(device_number).await?;
             locking_section!("Write", "Drive", {
                 let mut drive = drive.write().await;
-                drive.send_init(cbm, &ignore).map_err(|e| e.into())
+                let results = drive.send_init(&mut cbm, &ignore);
+
+                Ok(results
+                    .into_iter()
+                    .map(|r| {
+                        r.map_err(|e| Error::Rs1541 {
+                            message: format!("Failed to initialize drive {}", device_number),
+                            error: e,
+                        })
+                    })
+                    .collect())
             })
         })
     }
 
     /// Reset the entire bus
-    pub async fn reset_bus(&self) -> Result<(), DriveError> {
+    pub async fn reset_bus(&self) -> Result<(), Error> {
         info!("Initiating bus reset");
         locking_section!("Lock", "Cbm", {
             let cbm = self.cbm.lock().await.clone();
-            cbm.reset_bus()?;
+            cbm.reset_bus().map_err(|e| Error::Rs1541 {
+                message: "Failed to reset bus".to_string(),
+                error: e,
+            })?;
         });
 
         info!("Bus reset completed successfully");
-
         Ok(())
     }
 
     /// Check if a drive exists and is responding
     #[allow(dead_code)]
-    pub async fn validate_drive(&self, device_number: u8) -> Result<(), DriveError> {
+    pub async fn validate_drive(&self, device_number: u8) -> Result<(), Error> {
         debug!("Validating drive {}", device_number);
 
         let drive = locking_section!("Read", "Drives", {
@@ -278,7 +235,10 @@ impl DriveManager {
                 Some(drive) => drive,
                 None => {
                     debug!("Drive {} not found during validation", device_number);
-                    return Err(DriveError::DriveNotFound(device_number));
+                    return Err(Error::Fs1541 {
+                        message: format!("Drive {} not found", device_number),
+                        error: Fs1541Error::Validation("Drive does not exist".to_string()),
+                    });
                 }
             }
             .clone()
@@ -288,16 +248,18 @@ impl DriveManager {
             let drive = drive.read().await;
             if !drive.is_responding() {
                 warn!("Drive {} is not responding", device_number);
-                return Err(DriveError::DriveNotResponding(device_number, String::new()));
+                return Err(Error::Fs1541 {
+                    message: format!("Drive {} is not responding", device_number),
+                    error: Fs1541Error::Operation("Drive not responding".to_string()),
+                });
             }
         });
 
         debug!("Drive {} validated successfully", device_number);
-
         Ok(())
     }
 
-    /// Check if a drive exists
+    // Rest of the implementation remains unchanged as it doesn't involve error handling
     #[allow(dead_code)]
     pub async fn drive_exists(&self, device_number: u8) -> bool {
         trace!("Checking existence of drive {}", device_number);
@@ -309,7 +271,6 @@ impl DriveManager {
         exists
     }
 
-    /// Get the list of all connected drive numbers
     #[allow(dead_code)]
     pub async fn connected_drives(&self) -> Vec<u8> {
         trace!("Getting list of connected drives");
@@ -324,28 +285,30 @@ impl DriveManager {
     pub async fn cleanup_drives(&self) {
         trace!("Starting cleanup of all drives");
 
-        // Get a list of all drives to clean up
         let drive_numbers: Vec<u8> = locking_section!("Read", "Drives", {
             let drives = self.drives.read().await;
             drives.keys().cloned().collect()
         });
 
-        // Clean up each drive individually
         for device_number in drive_numbers {
             match self.remove_drive(device_number).await {
                 Ok(_) => info!("Successfully cleaned up drive {}", device_number),
-                Err(DriveError::DriveBusy(num)) => {
-                    warn!("Drive {} is busy during cleanup - forcing removal", num);
-                    // Force remove from hashmap even if busy
+                Err(Error::Fs1541 {
+                    message: _,
+                    error: Fs1541Error::Operation(op),
+                }) if op == "Drive is busy" => {
+                    warn!(
+                        "Drive {} is busy during cleanup - forcing removal",
+                        device_number
+                    );
                     locking_section!("Write", "Drives", {
-                        self.drives.write().await.remove(&num);
+                        self.drives.write().await.remove(&device_number);
                     });
                 }
                 Err(e) => warn!("Failed to clean up drive {}: {}", device_number, e),
             }
         }
 
-        // Final verification that drives are empty
         locking_section!("Read", "Drives", {
             let drives = self.drives.read().await;
             if !drives.is_empty() {

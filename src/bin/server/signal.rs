@@ -1,5 +1,4 @@
-use crate::error::DaemonError;
-
+use fs1541::error::{Error, Fs1541Error};
 use log::{error, info};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -13,12 +12,15 @@ impl SignalHandler {
         SignalHandler {}
     }
 
-    pub async fn handle_signals(&self) -> Result<(), DaemonError> {
-        let mut sigterm = signal(SignalKind::terminate()).map_err(|e| {
-            DaemonError::InternalError(format!("Failed to register to handle SIGTERM {}", e))
+    pub async fn handle_signals(&self) -> Result<(), Error> {
+        let mut sigterm = signal(SignalKind::terminate()).map_err(|e| Error::Fs1541 {
+            message: "Failed to register to handle SIGTERM".into(),
+            error: Fs1541Error::Internal(e.to_string()),
         })?;
-        let mut sigint = signal(SignalKind::interrupt()).map_err(|e| {
-            DaemonError::InternalError(format!("Failed to register to handle SIGINT {}", e))
+
+        let mut sigint = signal(SignalKind::interrupt()).map_err(|e| Error::Fs1541 {
+            message: "Failed to register to handle SIGINT".into(),
+            error: Fs1541Error::Internal(e.to_string()),
         })?;
 
         let force_quit = Arc::new(AtomicBool::new(false));

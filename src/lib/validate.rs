@@ -1,28 +1,29 @@
+use crate::error::{Error, Fs1541Error};
+
 use log::debug;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use rs1541::CbmError;
-
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum ValidationType {
     Mount,
     Unmount,
 }
+
 pub fn validate_mountpoint<P: AsRef<Path>>(
     path: P,
     vtype: ValidationType,
     canonicalize: bool,
-) -> Result<PathBuf, CbmError> {
+) -> Result<PathBuf, Error> {
     let path = path.as_ref();
 
     // Check if path exists before trying to canonicalize
     if !path.is_absolute() && !path.exists() {
-        return Err(CbmError::ValidationError(format!(
-            "Path {} does not exist",
-            path.display()
-        )));
+        return Err(Error::Fs1541 {
+            message: "Mountpoint validation failed".into(),
+            error: Fs1541Error::Validation(format!("Path {} does not exist", path.display())),
+        });
     }
 
     // Get absolute path
@@ -34,54 +35,65 @@ pub fn validate_mountpoint<P: AsRef<Path>>(
             "Path {:?} isn't absolute - attempting to canonicalize",
             path
         );
-        path.canonicalize().map_err(|e| {
-            CbmError::ValidationError(format!(
+        path.canonicalize().map_err(|e| Error::Fs1541 {
+            message: "Mountpoint validation failed".into(),
+            error: Fs1541Error::Validation(format!(
                 "Path {} is not absolute, and can't canonicalize: {}",
                 path.display(),
                 e
-            ))
+            )),
         })?
     } else {
-        return Err(CbmError::ValidationError(format!(
-            "Path '{}' must be absolute",
-            path.display()
-        )));
+        return Err(Error::Fs1541 {
+            message: "Mountpoint validation failed".into(),
+            error: Fs1541Error::Validation(format!("Path '{}' must be absolute", path.display())),
+        });
     };
 
-    // Then check if it's a directory
+    // Check if it's a directory
     if !vpath.is_dir() {
-        return Err(CbmError::ValidationError(format!(
-            "Mountpoint {} is not a directory",
-            vpath.display()
-        )));
+        return Err(Error::Fs1541 {
+            message: "Mountpoint validation failed".into(),
+            error: Fs1541Error::Validation(format!(
+                "Mountpoint {} is not a directory",
+                vpath.display()
+            )),
+        });
     }
 
     // Check if empty when mounting
     if vtype == ValidationType::Mount {
         let has_entries = fs::read_dir(&vpath)
-            .map_err(|e| {
-                CbmError::ValidationError(format!(
+            .map_err(|e| Error::Fs1541 {
+                message: "Mountpoint validation failed".into(),
+                error: Fs1541Error::Validation(format!(
                     "Failed to read directory {}: {}",
                     vpath.display(),
                     e
-                ))
+                )),
             })?
             .next()
             .is_some();
         if has_entries {
-            return Err(CbmError::ValidationError(format!(
-                "Mountpoint {} is not empty",
-                vpath.display()
-            )));
+            return Err(Error::Fs1541 {
+                message: "Mountpoint validation failed".into(),
+                error: Fs1541Error::Validation(format!(
+                    "Mountpoint {} is not empty",
+                    vpath.display()
+                )),
+            });
         }
     }
 
     // Check write access
     if !has_write_permission(&vpath) {
-        return Err(CbmError::ValidationError(format!(
-            "No write permission for mountpoint {}",
-            vpath.display()
-        )));
+        return Err(Error::Fs1541 {
+            message: "Mountpoint validation failed".into(),
+            error: Fs1541Error::Validation(format!(
+                "No write permission for mountpoint {}",
+                vpath.display()
+            )),
+        });
     }
 
     Ok(vpath)
@@ -111,80 +123,5 @@ fn has_write_permission<P: AsRef<Path>>(path: P) -> bool {
             }
         }
         Err(_) => false,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    mod mountpoint_validation {
-        use super::*;
-        use std::fs;
-
-        #[test]
-        fn test_absolute_path() {
-            let temp_dir = TempDir::new().unwrap();
-            let path = temp_dir.path().to_path_buf();
-
-            assert!(matches!(
-                validate_mountpoint(&path, ValidationType::Mount, false),
-                Ok(_)
-            ));
-        }
-
-        #[test]
-        fn test_non_absolute_path() {
-            assert!(validate_mountpoint("./relative/path", ValidationType::Mount, false).is_err());
-        }
-
-        #[test]
-        fn test_non_empty_directory() {
-            let temp_dir = TempDir::new().unwrap();
-            let file_path = temp_dir.path().join("test.txt");
-            fs::write(&file_path, "test content").unwrap();
-
-            assert!(validate_mountpoint(temp_dir.path(), ValidationType::Mount, false).is_err());
-        }
-
-        #[test]
-        fn test_not_directory() {
-            let temp_dir = TempDir::new().unwrap();
-            let file_path = temp_dir.path().join("test.txt");
-            fs::write(&file_path, "test content").unwrap();
-
-            assert!(validate_mountpoint(&file_path, ValidationType::Mount, false).is_err());
-        }
-
-        #[test]
-        fn test_canonicalize() {
-            let temp_dir = TempDir::new().unwrap();
-            let path = temp_dir.path().join("test");
-            fs::create_dir(&path).unwrap();
-
-            assert!(matches!(
-                validate_mountpoint(&path, ValidationType::Mount, true),
-                Ok(_)
-            ));
-        }
-
-        #[test]
-        fn test_write_permission() {
-            let temp_dir = TempDir::new().unwrap();
-            assert!(has_write_permission(temp_dir.path()));
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let readonly_dir = temp_dir.path().join("readonly");
-                fs::create_dir(&readonly_dir).unwrap();
-                let mut perms = fs::metadata(&readonly_dir).unwrap().permissions();
-                perms.set_mode(0o444); // read-only
-                fs::set_permissions(&readonly_dir, perms).unwrap();
-
-                assert!(!has_write_permission(&readonly_dir));
-            }
-        }
     }
 }

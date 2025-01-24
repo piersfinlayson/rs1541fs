@@ -2,10 +2,11 @@ use rs1541::Cbm;
 
 use crate::bg::{OpResponse, Operation, Proc, MAX_BG_CHANNELS};
 use crate::drivemgr::DriveManager;
-use crate::error::DaemonError;
 use crate::ipc::{IpcServer, MAX_BG_RSP_CHANNELS};
 use crate::locking_section;
 use crate::mount::Mount;
+
+use fs1541::error::{Error, Fs1541Error};
 
 use log::{debug, error, info, trace, warn};
 use nix::unistd::Pid;
@@ -24,7 +25,7 @@ pub const CLEANUP_LOOP_TIMER: Duration = Duration::from_millis(10);
 pub const CLEANUP_OVERALL_TIMER: Duration = Duration::from_secs(5);
 
 /// Main 1541fsd data structure, storing:
-/// * libopencbm handle
+/// * rs1541 handle
 /// * mountpoints
 ///
 /// An instance of this struct must be wrapped in Arc and Mutex in order to
@@ -82,7 +83,7 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    pub fn new(pid: Pid, cbm: Arc<Mutex<Cbm>>) -> Result<Self, DaemonError> {
+    pub fn new(pid: Pid, cbm: Arc<Mutex<Cbm>>) -> Result<Self, Error> {
         // Create channels - to send to the BackgroundProcess and for IpcServer
         // to receive back from it
         let (bg_proc_tx, bg_proc_rx) = mpsc::channel(MAX_BG_CHANNELS);
@@ -132,7 +133,7 @@ impl Daemon {
         self.ipc_server_handle.take().unwrap()
     }
 
-    pub fn create_ipc_server(&mut self) -> Result<Receiver<OpResponse>, DaemonError> {
+    pub fn create_ipc_server(&mut self) -> Result<Receiver<OpResponse>, Error> {
         // create_ipc_server must only be called once
         assert!(self.ipc_server.is_none());
 
@@ -147,10 +148,7 @@ impl Daemon {
         Ok(bg_rsp_rx)
     }
 
-    pub async fn start_ipc_server(
-        &mut self,
-        bg_rsp_rx: Receiver<OpResponse>,
-    ) -> Result<(), DaemonError> {
+    pub async fn start_ipc_server(&mut self, bg_rsp_rx: Receiver<OpResponse>) -> Result<(), Error> {
         // Return Result instead of ()
         trace!("Entered: start_ipc_server");
         assert!(self.ipc_server.is_some());
@@ -173,7 +171,7 @@ impl Daemon {
         Ok(())
     }
 
-    pub fn create_bg_proc(&mut self) -> Result<(), DaemonError> {
+    pub fn create_bg_proc(&mut self) -> Result<(), Error> {
         // create_bg_proc must only be called once
         assert!(self.bg_proc.is_none());
 
@@ -257,7 +255,7 @@ impl Daemon {
         self.drive_mgr.lock().await.cleanup_drives().await;
     }
 
-    pub async fn shutdown(&mut self) -> Result<(), DaemonError> {
+    pub async fn shutdown(&mut self) -> Result<(), Error> {
         info!("Starting shutdown sequence");
 
         // Get clones of abort handles to move into cleanup closure, and to
@@ -321,9 +319,10 @@ impl Daemon {
                         abort.abort();
                     }
                 }
-                Err(DaemonError::InternalError(format!(
-                    "Timed out trying to clean up"
-                )))
+                Err(Error::Fs1541 {
+                    message: "Cleanup timed out".into(),
+                    error: Fs1541Error::Timeout("Threads aborted".into(), CLEANUP_OVERALL_TIMER),
+                })
             }
         }
     }

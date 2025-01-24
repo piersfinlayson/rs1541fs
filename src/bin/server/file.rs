@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-
 use rs1541::{CbmDiskHeader, CbmFileEntry};
 use std::time::SystemTime;
 use thiserror::Error;

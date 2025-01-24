@@ -1,79 +1,16 @@
 use crate::bg::Operation;
-use crate::drivemgr::{DriveError, DriveManager};
+use crate::drivemgr::DriveManager;
 use crate::locking_section;
-use crate::mount::{Mount, MountError};
+use crate::mount::Mount;
 
+use fs1541::error::{Error, Fs1541Error};
 use rs1541::Cbm;
 
 use log::{debug, info, trace, warn};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use thiserror::Error;
 use tokio::sync::{mpsc::Sender, Mutex, RwLock};
-
-#[derive(Error, Debug)]
-pub enum MountSvcError {
-    #[error("Mountpoint {0} not found")]
-    MountpointNotFound(String),
-    #[error("Mount {0} already exists")]
-    MountExists(String),
-    #[error("Device {0} already mounted")]
-    DeviceExists(u8),
-    #[error("Invalid device number {0} (must be 0-31)")]
-    InvalidDeviceNumber(u8),
-    #[error("Bus operation failed: {0}")]
-    BusError(String),
-    #[error("Operation timeout {0}")]
-    Timeout(u8),
-    #[error("Internal error {0}")]
-    InternalError(String),
-    #[error("Device {0} not found")]
-    DeviceNotFound(u8),
-    #[error("Device {0} initialization failed: {1}")]
-    InitializationError(u8, String),
-    #[error("Device {0} is not responding: {1}")]
-    DeviceNotResponding(u8, String),
-    #[error("Device {0} reports error: {1}")]
-    DeviceError(u8, String),
-    #[error("Device {0} is busy")]
-    DeviceBusy(u8),
-    #[error("Invalid device state: {1} device {0}")]
-    InvalidState(u8, String),
-    #[error("Other error: {1} device {0}")]
-    OtherError(u8, String),
-}
-
-impl From<DriveError> for MountSvcError {
-    fn from(error: DriveError) -> Self {
-        match error {
-            DriveError::DriveExists(n) => MountSvcError::DeviceExists(n),
-            DriveError::DriveNotFound(n) => MountSvcError::DeviceNotFound(n),
-            DriveError::InvalidDeviceNumber(n) => MountSvcError::InvalidDeviceNumber(n),
-            DriveError::BusError(s) => MountSvcError::BusError(s),
-            DriveError::Timeout(n) => MountSvcError::Timeout(n),
-            DriveError::InitializationError(n, s) => MountSvcError::InitializationError(n, s),
-            DriveError::DriveNotResponding(n, s) => MountSvcError::DeviceNotResponding(n, s),
-            DriveError::DriveError(n, s) => MountSvcError::DeviceError(n, s),
-            DriveError::DriveBusy(n) => MountSvcError::DeviceBusy(n),
-            DriveError::InvalidState(n, s) => MountSvcError::InvalidState(n, s),
-            DriveError::OpenCbmError(n, s) => MountSvcError::DeviceError(n, s),
-            DriveError::OtherError(n, s) => MountSvcError::OtherError(n, s),
-        }
-    }
-}
-
-impl From<MountError> for MountSvcError {
-    fn from(error: MountError) -> Self {
-        match error {
-            MountError::CbmError(msg) => MountSvcError::BusError(msg), // CBM errors relate to the bus communication
-            MountError::InternalError(msg) => MountSvcError::InternalError(msg), // Direct mapping for internal errors
-            MountError::ValidationError(msg) => {
-                MountSvcError::InternalError(format!("Validation error: {}", msg))
-            } // Map validation to internal errors with context
-        }
-    }
-}
 
 /// Service that sits above DeviceManager and Mount to manage lifecycle of
 /// CbmDeviceUnit and Mount objects - as Mount lifecycle operations require
@@ -105,9 +42,8 @@ impl MountService {
         mountpoint: P,
         dummy_formats: bool,
         sender: Arc<Sender<Operation>>,
-    ) -> Result<(), MountSvcError> {
-        // Create a CbmDriveUnit for this mount.  Will fail if already
-        // exists.
+    ) -> Result<(), Error> {
+        // Create a CbmDriveUnit for this mount. Will fail if already exists.
         let drive_unit = locking_section!("Lock", "Drive Manager", {
             let drive_mgr = self.drive_mgr.lock().await;
             drive_mgr.add_drive(device_number).await?
@@ -134,7 +70,7 @@ impl MountService {
                     if let Err(_remove_err) = drive_mgr.remove_drive(device_number).await {
                         warn!("Failed to cleanup failed mount: {}", e);
                     }
-                    return Err(e.into());
+                    return Err(e);
                 });
             }
         };
@@ -155,10 +91,13 @@ impl MountService {
                         if let Err(_remove_err) = drive_mgr.remove_drive(device_number).await {
                             warn!("Failed to cleanup failed mount");
                         }
-                        Err(MountSvcError::MountExists(format!(
-                            "Already have mount at {}",
-                            mountpoint.as_ref().to_string_lossy()
-                        )))
+                        Err(Error::Fs1541 {
+                            message: format!(
+                                "Already have mount at {}",
+                                mountpoint.as_ref().to_string_lossy()
+                            ),
+                            error: Fs1541Error::Operation(String::from("Mount already exists")),
+                        })
                     })
                 }
             }
@@ -168,24 +107,27 @@ impl MountService {
     pub async fn get_mount<P: AsRef<Path>>(
         &self,
         mountpoint: P,
-    ) -> Result<Arc<RwLock<Mount>>, MountSvcError> {
+    ) -> Result<Arc<RwLock<Mount>>, Error> {
         trace!("Getting mount {}", mountpoint.as_ref().to_string_lossy());
         locking_section!("Lock", "Mountpoints", {
             let mountpoints = self.mountpoints.read().await;
-            // Assuming mountpoints is a HashMap or similar
             mountpoints
                 .get(mountpoint.as_ref())
                 .cloned() // Clone the Arc if it exists
-                .ok_or(MountSvcError::MountpointNotFound(
-                    mountpoint.as_ref().to_string_lossy().into(),
-                ))
+                .ok_or(Error::Fs1541 {
+                    message: format!(
+                        "Mountpoint {} not found",
+                        mountpoint.as_ref().to_string_lossy()
+                    ),
+                    error: Fs1541Error::Operation(String::from("Mountpoint not found")),
+                })
         })
     }
 
     pub async fn get_mount_from_device_num(
         &self,
         device_number: u8,
-    ) -> Result<Arc<RwLock<Mount>>, MountSvcError> {
+    ) -> Result<Arc<RwLock<Mount>>, Error> {
         let mount = locking_section!("Lock", "Mountpoints", {
             let mps = self.mountpoints.read().await;
             for (_path, mps_mount) in mps.iter() {
@@ -206,23 +148,26 @@ impl MountService {
                     return Ok(mount);
                 }
             }
-            Err(MountSvcError::DeviceNotFound(device_number))
+            Err(Error::Fs1541 {
+                message: format!("Device {} not found", device_number),
+                error: Fs1541Error::Operation(String::from("Device not found")),
+            })
         });
 
         mount
     }
 
     /// The force option is used by cleanup() in order to make the unmount
-    /// happen even in the even of failures (in particular the lack of a
-    /// drive).  The drive may have been removed first in a shutdown scenario
+    /// happen even in the event of failures (in particular the lack of a
+    /// drive). The drive may have been removed first in a shutdown scenario
     /// due to timing windows.
     pub async fn unmount<P: AsRef<Path>>(
         &self,
         device_number: Option<u8>,
         mountpoint: Option<P>,
         force: bool,
-    ) -> Result<(), MountSvcError> {
-        // We have to find the Mount first.  We either find it from the
+    ) -> Result<(), Error> {
+        // We have to find the Mount first. We either find it from the
         // device_number or the mountpoint
         assert!(mountpoint.is_some() || device_number.is_some());
         assert!(device_number.is_none() || mountpoint.is_none());
@@ -269,14 +214,14 @@ impl MountService {
             mount.write().await.unmount();
         });
 
-        // Next step is to remove the drive.  We do this first in case the
+        // Next step is to remove the drive. We do this first in case the
         // drive is busy and can't be removed - we don't want to have already
         // removed from mountpaths
         locking_section!("Lock", "Drive Manager", {
             let drive_mgr = self.drive_mgr.lock().await;
             if let Err(e) = drive_mgr.remove_drive(device_number).await {
                 if !force {
-                    return Err(e.into());
+                    return Err(e);
                 }
                 debug!(
                     "Removing mount device {} - drive already removed",

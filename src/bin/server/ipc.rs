@@ -1,3 +1,4 @@
+use fs1541::error::{Error, Fs1541Error};
 /// Contains IPC server implementation to receive and response to 1541fs
 /// client requests.  Any requests which need to be handled asyncronously are
 /// sent to BackgroundProcess for handling.
@@ -6,11 +7,10 @@
 /// and receives another mpsc Receiver which is used to receive replies from
 /// BackgroundProcess, so they can be returned to the client (assuming it
 /// hasn't timed out and dropped the connection to the server).
-use rs1541fs::ipc::Request::{self, BusReset, Die, GetStatus, Identify, Mount, Ping, Unmount};
-use rs1541fs::ipc::{Response, SOCKET_PATH};
+use fs1541::ipc::Request::{self, BusReset, Die, GetStatus, Identify, Mount, Ping, Unmount};
+use fs1541::ipc::{Response, SOCKET_PATH};
 
-use crate::bg::{OpError, OpResponse, OpResponseType, OpType, Operation, Priority};
-use crate::error::DaemonError;
+use crate::bg::{OpResponse, OpResponseType, OpType, Operation, Priority};
 use crate::mount::{validate_mount_request, validate_unmount_request};
 
 use either::{Left, Right};
@@ -76,26 +76,27 @@ impl IpcServer {
         }
     }
 
-    async fn send_response(
-        stream: &mut OwnedWriteHalf,
-        response: Response,
-    ) -> Result<(), DaemonError> {
+    async fn send_response(stream: &mut OwnedWriteHalf, response: Response) -> Result<(), Error> {
         // Serialize to string first since we can't use to_writer directly with async Write
-        let response_str = serde_json::to_string(&response).map_err(|e| {
-            DaemonError::InternalError(format!("Failed to serialize response: {}", e))
+        let response_str = serde_json::to_string(&response).map_err(|e| Error::Fs1541 {
+            message: "Failed to serialize response".to_string(),
+            error: Fs1541Error::Internal(e.to_string()),
         })?;
 
         // Write the response and newline in one operation
         stream
             .write_all(format!("{}\n", response_str).as_bytes())
             .await
-            .map_err(|e| DaemonError::InternalError(format!("Failed to write response: {}", e)))?;
+            .map_err(|e| Error::Io {
+                message: "Failed to write response".to_string(),
+                error: e.to_string(),
+            })?;
 
         // Flush the stream
-        stream
-            .flush()
-            .await
-            .map_err(|e| DaemonError::InternalError(format!("Failed to flush response: {}", e)))?;
+        stream.flush().await.map_err(|e| Error::Io {
+            message: "Failed to flush response".to_string(),
+            error: e.to_string(),
+        })?;
 
         Ok(())
     }
@@ -112,7 +113,7 @@ impl IpcServer {
         &self,
         stream: UnixStream,
         request: Request,
-    ) -> Result<(), DaemonError> {
+    ) -> Result<(), Error> {
         // Request fall into two categories:
         // * Those who need to be send to BackgroundProcess for processing
         // * Those who can be handled directly by Daemon
@@ -207,11 +208,9 @@ impl IpcServer {
         match either {
             Left(mut op) => {
                 op.stream = Some(writer);
-                self.bg_proc_tx.try_send(op).map_err(|e| {
-                    DaemonError::InternalError(format!(
-                        "Hit error sending message to background processor {}",
-                        e
-                    ))
+                self.bg_proc_tx.try_send(op).map_err(|e| Error::Fs1541 {
+                    message: "Failed to send message to background processor".to_string(),
+                    error: Fs1541Error::Internal(e.to_string()),
                 })
             }
             Right(rsp) => {
@@ -221,19 +220,34 @@ impl IpcServer {
         }
     }
 
-    pub async fn receive_request(&self, stream: &mut UnixStream) -> Result<Request, DaemonError> {
+    pub async fn receive_request(&self, stream: &mut UnixStream) -> Result<Request, Error> {
         let mut reader = BufReader::new(stream);
         let mut request_data = String::new();
 
-        reader.read_line(&mut request_data).await?;
+        reader
+            .read_line(&mut request_data)
+            .await
+            .map_err(|e| Error::Io {
+                message: "Failed to read request line".to_string(),
+                error: e.to_string(),
+            })?;
 
         serde_json::from_str(&request_data)
             .inspect(|req| debug!("Received request: {}", req))
             .map(|req: Request| Ok(req))
             .inspect_err(|e| debug!("Failed to parse incoming request {}", e))
-            .map_err(|e| {
-                DaemonError::InternalError(format!("Failed to parse incoming request {}", e))
+            .map_err(|e| Error::Serde {
+                message: "Failed to parse incoming request".to_string(),
+                error: e.to_string(),
             })?
+    }
+
+    async fn setup_socket(&self) -> Result<UnixListener, Error> {
+        Self::remove_socket_if_exists().await;
+        UnixListener::bind(SOCKET_PATH).map_err(|e| Error::Io {
+            message: "Failed to bind Unix socket".to_string(),
+            error: e.to_string(),
+        })
     }
 
     async fn remove_socket_if_exists() {
@@ -244,16 +258,11 @@ impl IpcServer {
         }
     }
 
-    async fn setup_socket(&self) -> Result<UnixListener, DaemonError> {
-        Self::remove_socket_if_exists().await;
-        Ok(UnixListener::bind(SOCKET_PATH)?)
-    }
-
     async fn cleanup_socket(&self) {
         Self::remove_socket_if_exists().await;
     }
 
-    async fn start_ipc_listener(&self) -> Result<JoinHandle<()>, DaemonError> {
+    async fn start_ipc_listener(&self) -> Result<JoinHandle<()>, Error> {
         self.ipc_server_run.store(true, Ordering::SeqCst);
         let listener = self.setup_socket().await?;
 
@@ -325,7 +334,7 @@ impl IpcServer {
     async fn start_bg_receiver(
         &mut self,
         bg_rsp_rx: Receiver<OpResponse>,
-    ) -> Result<JoinHandle<()>, DaemonError> {
+    ) -> Result<JoinHandle<()>, Error> {
         trace!("Entered start_background_receiver");
         let mut rx = bg_rsp_rx;
 
@@ -381,7 +390,7 @@ impl IpcServer {
     pub async fn start(
         &mut self,
         bg_rsp_rx: Receiver<OpResponse>,
-    ) -> Result<(JoinHandle<()>, JoinHandle<()>), DaemonError> {
+    ) -> Result<(JoinHandle<()>, JoinHandle<()>), Error> {
         // Start our listeners/receivers
         // Start the background receiver before the IPC listener as otherwise
         // there's a window when the IPC handle could send an operation for
@@ -393,7 +402,7 @@ impl IpcServer {
     }
 }
 
-pub struct OpResponseWrapper(Result<OpResponse, OpError>);
+pub struct OpResponseWrapper(Result<OpResponse, Error>);
 
 // Implement From for your newtype
 impl From<OpResponseWrapper> for Response {

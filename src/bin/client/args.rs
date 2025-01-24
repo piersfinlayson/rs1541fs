@@ -1,7 +1,7 @@
-use rs1541fs::validate::{validate_mountpoint, ValidationType};
-use rs1541::{validate_device, DeviceValidation}; 
+use fs1541::validate::{validate_mountpoint, ValidationType};
+use rs1541::{validate_device, DeviceValidation};
 
-use crate::error::ClientError;
+use fs1541::error::{Error, Fs1541Error};
 
 use clap::{ArgAction, Parser, Subcommand};
 use log::debug;
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 #[derive(Subcommand, Clone, Debug)]
 pub enum ClientOperation {
     /// Reset the IEC (or IEEE-488) bus
-    #[clap(alias = "busreset")] // also allow busreset
+    #[clap(alias = "busreset")]
     Resetbus,
 
     /// Mount the filesystem
@@ -19,27 +19,29 @@ pub enum ClientOperation {
         #[arg(short = 'd', long = "device", default_value = "8")]
         device: u8,
 
-        /// Don't actually format the disk if requested, valid on mount operation only
+        /// Don't actually format the disk if requested
         #[arg(short = 'f', long = "dummy-formats", action = ArgAction::SetTrue)]
         dummy_formats: bool,
 
         /// Mountpoint path
         mountpoint: String,
 
+        /// Validated absolute path (set during validation)
         #[arg(skip)]
         path: Option<PathBuf>,
     },
 
     /// Unmount the filesystem
-    #[clap(alias = "umount")] // also allow umount
+    #[clap(alias = "umount")]
     Unmount {
-        /// Device number (default: 8)
+        /// Device number (optional)
         #[arg(short = 'd', long = "device")]
         device: Option<u8>,
 
         /// Optional mountpoint path
         mountpoint: Option<String>,
 
+        /// Validated absolute path (set during validation)
         #[arg(skip)]
         path: Option<PathBuf>,
     },
@@ -52,7 +54,7 @@ pub enum ClientOperation {
     },
 
     /// Get status of the selected device
-    #[clap(alias = "status")] // also allow status
+    #[clap(alias = "status")]
     Getstatus {
         /// Device number (default: 8)
         #[arg(short = 'd', long = "device", default_value = "8")]
@@ -66,14 +68,14 @@ pub enum ClientOperation {
 impl ClientOperation {
     pub fn log(&self) {
         match self {
-            ClientOperation::Resetbus => {
+            Self::Resetbus => {
                 debug!("Operation: Reset Bus");
             }
-            ClientOperation::Mount {
+            Self::Mount {
                 device,
                 mountpoint,
-                path: _,
                 dummy_formats,
+                ..
             } => {
                 debug!(
                     "Operation: Mount device {} at '{}'{}",
@@ -86,27 +88,22 @@ impl ClientOperation {
                     }
                 );
             }
-            ClientOperation::Unmount {
-                device,
-                mountpoint,
-                path: _,
+            Self::Unmount {
+                device, mountpoint, ..
             } => {
                 debug!(
                     "Operation: Unmount device {} or mountpoint {}",
                     device.unwrap_or_default(),
-                    mountpoint
-                        .as_ref()
-                        .map(|p| format!("{}", p))
-                        .unwrap_or_default()
+                    mountpoint.as_deref().unwrap_or_default()
                 );
             }
-            ClientOperation::Identify { device } => {
+            Self::Identify { device } => {
                 debug!("Operation: Identify device {}", device);
             }
-            ClientOperation::Getstatus { device } => {
+            Self::Getstatus { device } => {
                 debug!("Operation: Get status of device {}", device);
             }
-            ClientOperation::Kill => {
+            Self::Kill => {
                 debug!("Operation: Kill daemon");
             }
         }
@@ -115,20 +112,19 @@ impl ClientOperation {
 
 #[derive(Parser, Debug)]
 #[command(
-   name = env!("CARGO_BIN_NAME"),
-   version = env!("CARGO_PKG_VERSION"),
-   author = env!("CARGO_PKG_AUTHORS"),
-   about = env!("CARGO_PKG_DESCRIPTION"),
-   arg_required_else_help = true
+    name = env!("CARGO_BIN_NAME"),
+    version = env!("CARGO_PKG_VERSION"),
+    author = env!("CARGO_PKG_AUTHORS"),
+    about = env!("CARGO_PKG_DESCRIPTION"),
+    arg_required_else_help = true
 )]
 pub struct Args {
     #[command(subcommand)]
     pub operation: ClientOperation,
 }
 
-// Do expliciy args validation
 impl Args {
-    pub fn validate(mut self) -> Result<Self, ClientError> {
+    pub fn validate(mut self) -> Result<Self, Error> {
         match &mut self.operation {
             ClientOperation::Mount {
                 device,
@@ -136,11 +132,13 @@ impl Args {
                 path,
                 ..
             } => {
-                // Check the device number - this is required
-                validate_device(Some(*device), DeviceValidation::Required)?;
+                validate_device(Some(*device), DeviceValidation::Required).map_err(|e| {
+                    Error::Rs1541 {
+                        message: "Device validation failed".into(),
+                        error: e,
+                    }
+                })?;
 
-                // Check the mountpoint and update path and mountpoint in
-                // case it gets canonicalized
                 let new_path =
                     validate_mountpoint(Path::new(mountpoint), ValidationType::Mount, true)?;
                 *path = Some(new_path.clone());
@@ -151,44 +149,51 @@ impl Args {
                 mountpoint,
                 path,
             } => {
-                // At least one of device or mountpoint must be provided
+                // Validate that at least one option is provided
                 if device.is_none() && mountpoint.is_none() {
-                    return Err(ClientError::ConfigurationError(format!(
-                        "Either --device or mountpoint must be specified for unmount"
-                    )));
+                    return Err(Error::Fs1541 {
+                        message: "Unmount validation failed".into(),
+                        error: Fs1541Error::Configuration(
+                            "Either --device or mountpoint must be specified for unmount".into(),
+                        ),
+                    });
                 }
 
-                // Rest of your existing validation:
-                validate_device(*device, DeviceValidation::Optional)?;
+                // Validate that both aren't provided
+                if device.is_some() && mountpoint.is_some() {
+                    return Err(Error::Fs1541 {
+                        message: "Unmount validation failed".into(),
+                        error: Fs1541Error::Configuration(
+                            "Only specify --device or mountpoint on unmount".into(),
+                        ),
+                    });
+                }
 
-                if mountpoint.is_some() {
-                    let new_path = validate_mountpoint(
-                        Path::new(mountpoint.as_ref().unwrap()),
-                        ValidationType::Unmount,
-                        true,
-                    )?;
+                if let Some(dev) = *device {
+                    validate_device(Some(dev), DeviceValidation::Required).map_err(|e| {
+                        Error::Rs1541 {
+                            message: "Device validation failed".into(),
+                            error: e,
+                        }
+                    })?;
+                }
+
+                if let Some(mount) = mountpoint {
+                    let new_path =
+                        validate_mountpoint(Path::new(mount), ValidationType::Unmount, true)?;
                     *path = Some(new_path.clone());
                     *mountpoint = Some(new_path.display().to_string());
                 }
-
-                // Only device or mountpoint should be provided on unmount
-                if (*device).is_some() && (*mountpoint).is_some() {
-                    return Err(ClientError::ConfigurationError(format!(
-                        "Only specify --device or mountpoint on unmount"
-                    )));
-                }
             }
-            ClientOperation::Identify { device } => {
-                // Check the device number - this is required
-                validate_device(Some(*device), DeviceValidation::Required)?;
+            ClientOperation::Identify { device } | ClientOperation::Getstatus { device } => {
+                validate_device(Some(*device), DeviceValidation::Required).map_err(|e| {
+                    Error::Rs1541 {
+                        message: "Device validation failed".into(),
+                        error: e,
+                    }
+                })?;
             }
-            ClientOperation::Getstatus { device } => {
-                // Check the device number - this is required
-                validate_device(Some(*device), DeviceValidation::Required)?;
-            }
-            // Resetbus and Kill don't need validation
-            ClientOperation::Resetbus => {}
-            ClientOperation::Kill => {}
+            ClientOperation::Resetbus | ClientOperation::Kill => {}
         }
         Ok(self)
     }
@@ -197,7 +202,7 @@ impl Args {
 #[cfg(test)]
 mod tests {
     use crate::args::{Args, ClientOperation};
-    use crate::error::ClientError;
+    use fs1541::error::Error;
     use rs1541::{DEFAULT_DEVICE_NUM, MAX_DEVICE_NUM, MIN_DEVICE_NUM};
     use tempfile::TempDir;
 
@@ -211,8 +216,8 @@ mod tests {
         message: String,
     }
 
-    impl From<ClientError> for TestError {
-        fn from(e: ClientError) -> Self {
+    impl From<Error> for TestError {
+        fn from(e: Error) -> Self {
             TestError {
                 message: e.to_string(),
             }
@@ -422,7 +427,7 @@ mod tests {
             assert!(result.is_err());
             assert_eq!(
                 result.unwrap_err(),
-                "Configuration error: Only specify --device or mountpoint on unmount"
+                "Unmount validation failed | fs1541 error: Configuration error: Only specify --device or mountpoint on unmount"
             );
 
             // Test with only device (should succeed)
@@ -467,7 +472,7 @@ mod tests {
             assert!(result.is_err());
             assert_eq!(
                 result.unwrap_err(),
-                "Configuration error: Either --device or mountpoint must be specified for unmount"
+                "Unmount validation failed | fs1541 error: Configuration error: Either --device or mountpoint must be specified for unmount"
             );
 
             // Test with non-existent mountpoint

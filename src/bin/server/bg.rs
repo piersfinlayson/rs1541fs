@@ -1,12 +1,11 @@
-/// Background processing - provides a single worker thread which handles IPC
-/// and background tasks on behalf of Mounts
-use rs1541::{Cbm, CbmDeviceInfo, CbmDriveUnit};
-use rs1541::{CbmError, CbmStatus};
-
-use crate::drivemgr::{DriveError, DriveManager};
+use crate::drivemgr::DriveManager;
 use crate::locking_section;
 use crate::mount::Mount;
-use crate::mountsvc::{MountService, MountSvcError};
+use crate::mountsvc::MountService;
+use fs1541::error::{Error, Fs1541Error};
+/// Background processing - provides a single worker thread which handles IPC
+/// and background tasks on behalf of Mounts
+use rs1541::{Cbm, CbmDeviceInfo, CbmDriveUnit, CbmStatus};
 
 use log::{debug, error, info, trace, warn};
 use std::collections::{HashMap, VecDeque};
@@ -15,7 +14,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
-use thiserror::Error;
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, RwLock};
@@ -162,7 +160,7 @@ impl OpType {
 
 #[derive(Debug)]
 pub struct OpResponse {
-    pub rsp: Result<OpResponseType, OpError>,
+    pub rsp: Result<OpResponseType, Error>,
     pub stream: Option<OwnedWriteHalf>,
 }
 
@@ -338,147 +336,6 @@ impl From<OpType> for OpResponseType {
     }
 }
 
-/// Errors that can occur during background processing
-#[derive(Error, Debug, Clone)]
-pub enum OpError {
-    #[error("Operation for device {0} timed out")]
-    OperationTimeout(u8),
-    #[error("Operation cancelled")]
-    OperationCancelled,
-    #[error("Mount {0} not found")]
-    MountNotFound(String),
-    #[error("Hardware error: {0}")]
-    HardwareError(String),
-    #[error("Invalid operation state: {0}")]
-    InvalidState(String),
-    #[error("Internal error: {0}")]
-    InternalError(String),
-    #[error("Validation error: {0}")]
-    ValidationError(String),
-    #[error("Device {0} not found")]
-    DeviceNotFound(u8),
-    #[error("Device {0} is busy")]
-    DeviceBusy(u8),
-    #[error("Resource conflict: {0}")]
-    ResourceConflict(String),
-    #[error("Device {0} initialization failed: {1}")]
-    DeviceInitError(u8, String),
-    #[error("Device {0} not responding: {1}")]
-    DeviceNotResponding(u8, String),
-    #[error("Device {0} reports error: {1}")]
-    DeviceError(u8, String),
-}
-
-impl From<MountSvcError> for OpError {
-    fn from(err: MountSvcError) -> Self {
-        match err {
-            MountSvcError::MountpointNotFound(path) => OpError::MountNotFound(path),
-
-            MountSvcError::MountExists(path) => {
-                OpError::ResourceConflict(format!("Mount {} already exists", path))
-            }
-
-            MountSvcError::DeviceExists(dev) => {
-                OpError::ResourceConflict(format!("Device {} already mounted", dev))
-            }
-
-            MountSvcError::InvalidDeviceNumber(dev) => {
-                OpError::ValidationError(format!("Invalid device number {} (must be 0-31)", dev))
-            }
-
-            MountSvcError::BusError(msg) => OpError::HardwareError(format!("Bus error: {}", msg)),
-
-            MountSvcError::Timeout(device) => OpError::OperationTimeout(device),
-
-            MountSvcError::InternalError(msg) => OpError::InternalError(msg),
-
-            MountSvcError::DeviceNotFound(dev) => OpError::DeviceNotFound(dev),
-
-            MountSvcError::InitializationError(dev, msg) => OpError::DeviceInitError(dev, msg),
-
-            MountSvcError::DeviceNotResponding(dev, msg) => OpError::DeviceNotResponding(dev, msg),
-
-            MountSvcError::DeviceError(dev, msg) => OpError::DeviceError(dev, msg),
-
-            MountSvcError::DeviceBusy(dev) => OpError::DeviceBusy(dev),
-
-            MountSvcError::InvalidState(dev, state) => {
-                OpError::InvalidState(format!("Device {}: {}", dev, state))
-            }
-
-            MountSvcError::OtherError(_dev, msg) => OpError::ValidationError(msg),
-        }
-    }
-}
-
-impl From<DriveError> for OpError {
-    fn from(err: DriveError) -> Self {
-        match err {
-            DriveError::DriveExists(dev) => {
-                OpError::ResourceConflict(format!("Drive {} already exists", dev))
-            }
-            DriveError::DriveNotFound(dev) => OpError::DeviceNotFound(dev),
-            DriveError::InvalidDeviceNumber(dev) => {
-                OpError::ValidationError(format!("Invalid device number {} (must be 0-31)", dev))
-            }
-            DriveError::InitializationError(dev, msg) => OpError::DeviceInitError(dev, msg),
-            DriveError::BusError(msg) => OpError::HardwareError(format!("Bus error: {}", msg)),
-            DriveError::Timeout(device) => OpError::OperationTimeout(
-                device, // You might want to pass the actual timeout duration
-            ),
-            DriveError::DriveNotResponding(dev, msg) => OpError::DeviceNotResponding(dev, msg),
-            DriveError::DriveError(dev, msg) => OpError::DeviceError(dev, msg),
-            DriveError::DriveBusy(dev) => OpError::DeviceBusy(dev),
-            DriveError::InvalidState(dev, msg) => {
-                OpError::InvalidState(format!("Drive {}: {}", dev, msg))
-            }
-            DriveError::OpenCbmError(dev, msg) => {
-                OpError::HardwareError(format!("OpenCBM error on device {}: {}", dev, msg))
-            }
-            DriveError::OtherError(_dev, msg) => OpError::ValidationError(msg),
-        }
-    }
-}
-
-impl From<CbmError> for OpError {
-    fn from(error: CbmError) -> Self {
-        match error {
-            CbmError::DeviceError { device, message } => OpError::DeviceError(device, message),
-
-            CbmError::ChannelError { device, message }
-            | CbmError::FileError { device, message }
-            | CbmError::CommandError { device, message } => {
-                OpError::HardwareError(format!("Device {}: {}", device, message))
-            }
-
-            CbmError::StatusError { device, status } => {
-                OpError::DeviceError(device, status.to_string())
-            }
-
-            CbmError::TimeoutError { device } => OpError::OperationTimeout(device),
-
-            CbmError::InvalidOperation { device, message } => {
-                OpError::InvalidState(format!("Device {}: {}", device, message))
-            }
-
-            CbmError::OpenCbmError { device, error } => {
-                let msg = match device {
-                    Some(dev) => format!("OpenCBM error on device {}: {}", dev, error),
-                    None => format!("OpenCBM error: {}", error),
-                };
-                OpError::HardwareError(msg)
-            }
-
-            CbmError::Errno(errno) => OpError::HardwareError(format!("FUSE error: {}", errno)),
-
-            CbmError::ValidationError(msg) => OpError::ValidationError(msg),
-            CbmError::UsbError(msg) => OpError::HardwareError(msg),
-            CbmError::DriverNotOpen => OpError::HardwareError("Driver not open".to_string()),
-            CbmError::ParseError { message } => OpError::ValidationError(message),
-        }
-    }
-}
-
 /// Priority levels for background operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -489,8 +346,30 @@ pub enum Priority {
     Low,      // Other IPC and background tasks
 }
 
+impl Priority {
+    pub fn timeout(&self) -> Duration {
+        match self {
+            Priority::Critical => Duration::from_secs(30),
+            Priority::High => Duration::from_secs(60),
+            Priority::Normal => Duration::from_secs(120),
+            Priority::Low => Duration::from_secs(300),
+        }
+    }
+}
+
+impl std::fmt::Display for Priority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Priority::Critical => write!(f, "Critical"),
+            Priority::High => write!(f, "High"),
+            Priority::Normal => write!(f, "Normal"),
+            Priority::Low => write!(f, "Low"),
+        }
+    }
+}
+
 /// A background operation to be processed
-/// sender is the mpsc:Sender to use to send the OpResponse/OpError back to the
+/// sender is the mpsc:Sender to use to send the OpResponse/Error back to the
 /// originator
 /// stream is a UnixStream OwnedWriteHalf to pass back to the originator (f
 /// provided) so they can send the data out of the socket
@@ -521,6 +400,10 @@ impl Operation {
             stream,
         }
     }
+
+    pub fn priority_timeout(&self) -> Duration {
+        self.priority.timeout()
+    }
 }
 
 impl From<Operation> for OpResponse {
@@ -537,7 +420,7 @@ impl From<Operation> for OpResponse {
 
 #[allow(dead_code)]
 impl OpResponse {
-    pub fn with_error(error: OpError, stream: Option<OwnedWriteHalf>) -> Self {
+    pub fn with_error(error: Error, stream: Option<OwnedWriteHalf>) -> Self {
         OpResponse {
             rsp: Err(error),
             stream,
@@ -602,7 +485,13 @@ impl OperationQueues {
             for mut op in aged_out {
                 // Create response to send via oneshot
                 let rsp = OpResponse {
-                    rsp: Err(OpError::OperationTimeout(0)),
+                    rsp: Err(Error::Fs1541 {
+                        message: "Aged out operation".into(),
+                        error: Fs1541Error::Timeout(
+                            format!("Priority {}", op.priority),
+                            op.priority_timeout(),
+                        ),
+                    }),
                     stream: op.stream.take(),
                 };
 
@@ -662,10 +551,14 @@ impl Proc {
         }
     }
 
-    async fn execute_operation(&self, op_type: OpType) -> Result<OpResponseType, OpError> {
+    async fn execute_operation(&self, op_type: OpType) -> Result<OpResponseType, Error> {
         if self.shutdown.load(Ordering::Relaxed) {
-            return Err(OpError::OperationCancelled);
+            return Err(Error::Fs1541 {
+                message: "Operation cancelled".to_string(),
+                error: Fs1541Error::Operation("Operation cancelled".to_string()),
+            });
         }
+
         match op_type {
             OpType::Mount {
                 device,
@@ -681,14 +574,14 @@ impl Proc {
                     self.operation_sender.clone(),
                 )
                 .await
-                .map(|_| OpResponseType::Mount())
-                .map_err(|e| e.into()),
+                .map(|_| OpResponseType::Mount()),
+
             OpType::Unmount { device, mountpoint } => self
                 .mount_svc
                 .unmount(device, mountpoint, false)
                 .await
-                .map(|_| OpResponseType::Mount())
-                .map_err(|e| e.into()),
+                .map(|_| OpResponseType::Mount()),
+
             OpType::Identify { device } => {
                 locking_section!("Lock", "Drive Manager", {
                     let drive_mgr = self.drive_mgr.lock().await;
@@ -696,9 +589,9 @@ impl Proc {
                         .identify_drive(device)
                         .await
                         .map(|info| OpResponseType::Identify { info })
-                        .map_err(|e| e.into())
                 })
             }
+
             OpType::GetStatus { device } => {
                 locking_section!("Lock", "Drive Manager", {
                     let drive_mgr = self.drive_mgr.lock().await;
@@ -706,9 +599,9 @@ impl Proc {
                         .get_drive_status(device)
                         .await
                         .map(|status| OpResponseType::GetStatus { status })
-                        .map_err(|e| e.into())
                 })
             }
+
             OpType::BusReset => {
                 locking_section!("Lock", "Drive Manager", {
                     let drive_mgr = self.drive_mgr.lock().await;
@@ -716,13 +609,13 @@ impl Proc {
                         .reset_bus()
                         .await
                         .map(|_| OpResponseType::BusReset())
-                        .map_err(|e| e.into())
                 })
             }
-            _ => Err(OpError::InternalError(format!(
-                "Operation not yet supported {}",
-                op_type
-            ))),
+
+            _ => Err(Error::Fs1541 {
+                message: format!("Operation not yet supported {}", op_type),
+                error: Fs1541Error::Operation(format!("Operation not supported: {}", op_type)),
+            }),
         }
     }
 
@@ -730,26 +623,22 @@ impl Proc {
         &self,
         sender: Arc<Sender<OpResponse>>,
         rsp: OpResponse,
-    ) -> Result<(), OpError> {
+    ) -> Result<(), Error> {
         debug!("Attempting to send response from background processor");
         let send_result = sender.send(rsp).await;
         match &send_result {
             Ok(_) => debug!("Successfully sent response through channel"),
             Err(e) => error!("Failed to send through channel: {:?}", e),
         }
-        send_result.map_err(|e| OpError::InternalError(format!("Failed to send response {}", e)))
+        send_result.map_err(|e| Error::Fs1541 {
+            message: "Channel send error".to_string(),
+            error: Fs1541Error::Internal(format!("Failed to send response: {}", e)),
+        })
     }
 
-    async fn process_operation(&mut self, op: Operation) -> Result<(), OpError> {
-        // Set up timeout for the operation
-        let timeout = match op.priority {
-            Priority::Critical => Duration::from_secs(30),
-            Priority::High => Duration::from_secs(60),
-            Priority::Normal => Duration::from_secs(120),
-            Priority::Low => Duration::from_secs(300),
-        };
+    async fn process_operation(&mut self, op: Operation) -> Result<(), Error> {
+        let timeout = op.priority_timeout();
 
-        // Process with timeout
         let sender = op.sender.clone();
         let resp =
             match tokio::time::timeout(timeout, self.execute_operation(op.op_type.clone())).await {
@@ -757,14 +646,18 @@ impl Proc {
                     trace!("Handled Operation with response {:?}", resp);
                     resp
                 }
-                Err(op) => {
-                    debug!(
-                        "Hit timeout processing background operation {:?} {:?}",
-                        op, timeout
-                    );
-                    Err(OpError::OperationTimeout(0))
+                Err(_) => {
+                    debug!("Hit timeout processing background operation {:?}", timeout);
+                    Err(Error::Fs1541 {
+                        message: "Operation timed out".to_string(),
+                        error: Fs1541Error::Timeout(
+                            "Background operation timed out".to_string(),
+                            timeout,
+                        ),
+                    })
                 }
             };
+
         let op_response = OpResponse {
             rsp: resp,
             stream: op.stream,

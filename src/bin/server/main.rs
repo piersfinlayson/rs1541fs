@@ -2,7 +2,6 @@ mod args;
 mod bg;
 mod daemon;
 mod drivemgr;
-mod error;
 mod file;
 mod ipc;
 mod mount;
@@ -11,12 +10,13 @@ mod signal;
 
 use args::Args;
 use daemon::Daemon;
-use error::DaemonError;
+use fs1541::error::{Error, Fs1541Error};
+use fs1541::ipc::DAEMON_PID_FILENAME;
+use fs1541::logging::init_logging;
 use rs1541::Cbm;
-use rs1541fs::ipc::DAEMON_PID_FILENAME;
-use rs1541fs::logging::init_logging;
 
 use daemonize::Daemonize;
+#[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
 use nix::unistd::getpid;
 use signal::SignalHandler;
@@ -86,7 +86,7 @@ pub fn get_pid_filename() -> PathBuf {
     DAEMON_PID_FILENAME.into()
 }
 
-fn check_pid_file() -> Result<(), DaemonError> {
+fn check_pid_file() -> Result<(), Error> {
     let pid_file = get_pid_filename();
     if let Ok(_) = fs::metadata(&pid_file) {
         // PID file exists
@@ -101,8 +101,9 @@ fn check_pid_file() -> Result<(), DaemonError> {
         }
         // If we can't read the PID or process isn't running, remove the stale PID file
         info!("Removing stale PID file");
-        fs::remove_file(&pid_file).map_err(|e| {
-            DaemonError::InternalError(format!("Failed to remove stale PID file {}", e))
+        fs::remove_file(&pid_file).map_err(|e| Error::Fs1541 {
+            message: "Failed to remove stale PID file".into(),
+            error: Fs1541Error::Internal(e.to_string()),
         })?;
     }
     Ok(())
@@ -114,7 +115,7 @@ fn check_pid_file() -> Result<(), DaemonError> {
 // - Background listenere
 // - Fuse thread
 // Remainder are spares
-async fn async_main(args: &Args) -> Result<(), DaemonError> {
+async fn async_main(args: &Args) -> Result<(), Error> {
     // We do this after daemonizing so the PID used in syslog is the PID of
     // the daemon process, not the parent process that called daemonize()
     let pid = getpid();
@@ -124,9 +125,12 @@ async fn async_main(args: &Args) -> Result<(), DaemonError> {
         info!("Daemonized at pid {}", pid);
     }
 
-    // Connect to OpenCBM and open the XUM1541 device - we do this early on
+    // Use rs1541 and open the XUM1541 device - we do this early on
     // because there's no poin continuing if we don't have an XUM1541
-    let cbm = Cbm::new()?;
+    let cbm = Cbm::new().map_err(|e| Error::Rs1541 {
+        message: "Failed to initialize USB device".into(),
+        error: e,
+    })?;
     let shared_cbm = Arc::new(Mutex::new(cbm));
 
     // Now create the daemon object
@@ -185,23 +189,30 @@ async fn async_main(args: &Args) -> Result<(), DaemonError> {
             warn!("Background processing thread has exited");
             if let Err(e) = result {
                 error!("Background processor failed: {}", e);
-                return Err(DaemonError::InternalError("Background processor failed".into()));
+                return Err(Error::Fs1541 {
+                    message: "Background processor thread failed".into(),
+                    error: Fs1541Error::Internal(e.to_string())
+                });
             }
         }
         result = ipc_server_handle => {
             warn!("IP listener thread has exited");
             if let Err(e) = result {
                 error!("IPC server failed: {}", e);
-                return Err(DaemonError::InternalError("IPC server failed".into()));
+                return Err(Error::Fs1541 {
+                    message: "IPC server thread failed".into(),
+                    error: Fs1541Error::Internal(e.to_string())
+                });
             }
         }
         result = bg_listener_handle => {
-            warn!("Background response thread has exited");
             if let Err(e) = result {
                 error!("Background response thread failed: {}", e);
-                return Err(DaemonError::InternalError("Background response thread failed".into()));
-            }
-        }
+                return Err(Error::Fs1541 {
+                    message: "Background response thread failed".into(),
+                    error: Fs1541Error::Internal(e.to_string())
+                });
+            }        }
         _ = signal_handler.handle_signals() => {
             shared_daemon.lock().await.shutdown().await?
         }
@@ -226,7 +237,7 @@ impl Drop for MainCleanupGuard {
     }
 }
 
-fn main() -> Result<(), DaemonError> {
+fn main() -> Result<(), Error> {
     // Set up a cleanup guard to run when this function exits
     let _guard = MainCleanupGuard;
 
@@ -258,10 +269,10 @@ fn main() -> Result<(), DaemonError> {
             Ok(_) => {}
             Err(e) => {
                 eprintln!("Failed to dameonize, {}", e);
-                return Err(DaemonError::InternalError(format!(
-                    "Failed to daemonize {}",
-                    e
-                )));
+                return Err(Error::Fs1541 {
+                    message: "Failed to daemonize".into(),
+                    error: Fs1541Error::Internal(e.to_string()),
+                });
             }
         }
     }
