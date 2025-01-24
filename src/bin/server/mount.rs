@@ -219,17 +219,42 @@ impl Mount {
         ];
 
         // Init the drive
-        locking_section!("Lock", "Drive Manager", {
+        let result_vec = locking_section!("Lock", "Drive Manager", {
             let drive_mgr = self.drive_mgr.clone();
             let drive_mgr = drive_mgr.lock().await;
+            
+            // The only error we expect to see directly from init_drives()
+            // is a failure to get the drive object - i.e. it doesn't exist
             drive_mgr
                 .init_drive(self.device_num, &ignore)
                 .await
-                .inspect(|status_vec| {
-                    debug!("Status from drive (error 21 ignored): {:?}", status_vec)
-                })
-                .inspect_err(|e| info!("Hit error initializing drive when mounting {}", e))?;
+                .inspect_err(|e| info!("Hit error initializing drive when mounting {}", e))?
         });
+
+        // init_drive() returns an Ok(Vec<Result<CbmStatus, Error>>)
+        // so we need to check within this, to see if theere were
+        // any errors for the individual drive mecanisms.
+        if result_vec.len() == 0 {
+            let message = format!("Failed to initialize any drive units for device {}", self.device_num);
+            warn!("{}", message);
+            return Err(Error::Fs1541 { message, error: Fs1541Error::Operation("init_drive() returned OK, but no status response(s) - perhas the device has no drives?".to_string()) });
+        }
+        let mut drive_num = 0;
+        for drive_res in result_vec {
+            match drive_res {
+                Ok(_) => {
+                    trace!("Init succeeded for device {} drive unit {drive_num}", self.device_num);
+                },
+                Err(e) => {
+                    // One of the drive units hit an error that we don't
+                    // consider acceptable, so return.
+                    let message = format!("Hit error initializing device {} drive unit {drive_num}", self.device_num);
+                    warn!("{}", message);
+                    return Err(Error::Fs1541 { message, error: Fs1541Error::Operation(e.to_string()) } );
+                },
+            }
+            drive_num +=1 ;
+        }
 
         // Create a shared mutex for self, as this is what we'll need to
         // return
