@@ -17,15 +17,15 @@ use rs1541::Cbm;
 
 use daemonize::Daemonize;
 #[allow(unused_imports)]
-use log::{error, warn, info, debug, trace};
+use log::{debug, error, info, trace, warn};
 use nix::unistd::getpid;
 use signal::SignalHandler;
 use std::fs;
 use std::panic;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use std::process::ExitCode;
 
 // Get binary name
 pub const PKG_BIN_NAME: &str = env!("CARGO_BIN_NAME");
@@ -117,18 +117,17 @@ fn check_pid_file() -> Result<(), Error> {
 fn setup_daemon() -> Result<(), Error> {
     // Check there's no existing daemon running.
     check_pid_file()?;
-    
+
     let daemonize = Daemonize::new()
         .pid_file(get_pid_filename())
         .chown_pid_file(true)
         .working_directory("/tmp");
 
     // Attempt to daemonize
-    daemonize.start()
-        .map_err(|e| Error::Fs1541 {
-            message: "Daemonize start failed".into(),
-            error: Fs1541Error::Operation(e.to_string())
-        })
+    daemonize.start().map_err(|e| Error::Fs1541 {
+        message: "Daemonize start failed".into(),
+        error: Fs1541Error::Operation(e.to_string()),
+    })
 }
 
 // We'll set worker threads to 8:
@@ -289,8 +288,7 @@ fn main() -> ExitCode {
             }
         }
     }
-    
-    
+
     // Start the tokio runtime
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(NUM_WORKER_THREADS)

@@ -1,6 +1,6 @@
 use crate::locking_section;
 use fs1541::error::{Error, Fs1541Error};
-use rs1541::{Cbm, CbmDeviceInfo, CbmDriveUnit, CbmStatus, CbmErrorNumber};
+use rs1541::{Cbm, CbmDeviceInfo, CbmDriveUnit, CbmErrorNumber, CbmStatus};
 use rs1541::{MAX_DEVICE_NUM, MIN_DEVICE_NUM};
 
 use log::{debug, error, info, trace, warn};
@@ -47,44 +47,30 @@ impl DriveManager {
             });
         }
 
-        // Check whether drive exists
-        locking_section!("Read", "Drives", {
-            let drives = self.drives.read().await;
-            if drives.contains_key(&device_number) {
-                info!("Drive {} already exists", device_number);
-                return Err(Error::Fs1541 {
-                    message: format!("Drive {} already exists", device_number),
-                    error: Fs1541Error::Validation("Drive already exists".to_string()),
-                });
-            }
-        });
-
-        // Identify the drive
-        let info = locking_section!("Lock", "Cbm", {
+        // Create the drive unit.  We do this now even though it might already
+        // exist to simplify processing - if it does exist we'll drop this
+        // instance when it goes out of scope
+        let drive_unit = locking_section!("Lock", "Cbm", {
             let cbm = self.cbm.lock().await;
-            let info = cbm.identify(device_number).map_err(|e| Error::Rs1541 {
-                message: format!("Failed to identify drive {}", device_number),
+            CbmDriveUnit::try_from_bus(&cbm, device_number).map_err(|e| Error::Rs1541 {
+                message: format!("Failed to create drive {}", device_number),
                 error: e,
-            })?;
-            trace!("Drive info: {:?}", info);
-            info
+            })?
         });
 
-        // Create the CbmDriveUnit and insert it
+        // Insert the drive unit into the hashmap
         locking_section!("Write", "Drives", {
             let mut drives = self.drives.write().await;
-            let drive_unit = CbmDriveUnit::new(device_number, info.device_type);
             let shared_drive_unit = Arc::new(RwLock::new(drive_unit));
             let drive_unit_clone = shared_drive_unit.clone();
             match drives.insert(device_number, shared_drive_unit) {
                 Some(_drive) => {
-                    error!(
-                        "Drive already present, but when we checked earlier it wasn't {}",
-                        device_number
-                    );
+                    let message = format!("Failed to add drive unit {device_number}");
+                    let detail = format!("Drive {} already exists", device_number);
+                    warn!("{}: {}", message, detail);
                     Err(Error::Fs1541 {
-                        message: format!("Drive {} already exists", device_number),
-                        error: Fs1541Error::Internal("Race condition detected".to_string()),
+                        message,
+                        error: Fs1541Error::Operation(detail),
                     })
                 }
                 None => Ok(drive_unit_clone),
