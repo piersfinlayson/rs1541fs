@@ -273,7 +273,9 @@ impl DriveManager {
 
         let drive_numbers: Vec<u8> = locking_section!("Read", "Drives", {
             let drives = self.drives.read().await;
-            drives.keys().cloned().collect()
+            let drives = drives.keys().cloned().collect();
+            trace!("Going to remove drives {:?}", drives);
+            drives
         });
 
         for device_number in drive_numbers {

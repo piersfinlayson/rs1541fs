@@ -275,9 +275,6 @@ impl Daemon {
             self.stop_bg_proc(false);
             self.stop_ipc_all(false).await;
 
-            // Cleanup Drive Manager (which cleans up Drives and Mounts)
-            self.cleanup_drive_mgr().await;
-
             // Now wait until all of the abort handles signal the threads are
             // finished.  If an abort handle is None (due to some startup/
             // shutdown race codition) treat that thread as exited (which it
@@ -292,6 +289,11 @@ impl Daemon {
             {
                 sleep(CLEANUP_LOOP_TIMER).await;
             }
+
+            // Cleanup Drive Manager (which cleans up Drives)
+            // Mounts were already cleaned up by stop_bg_proc, and that
+            // should remove drives, but let's be on the safe side.
+            self.cleanup_drive_mgr().await;
         };
 
         match timeout(CLEANUP_OVERALL_TIMER, cleanup).await {
