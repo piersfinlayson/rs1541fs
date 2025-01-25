@@ -17,7 +17,7 @@ use rs1541::Cbm;
 
 use daemonize::Daemonize;
 #[allow(unused_imports)]
-use log::{debug, error, info, trace, warn};
+use log::{error, warn, info, debug, trace};
 use nix::unistd::getpid;
 use signal::SignalHandler;
 use std::fs;
@@ -25,7 +25,12 @@ use std::panic;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use std::process::ExitCode;
 
+// Get binary name
+pub const PKG_BIN_NAME: &str = env!("CARGO_BIN_NAME");
+
+// Set the number of tokio worker threads
 const NUM_WORKER_THREADS: usize = 8;
 
 /// Macro to wrap lock(), read() and write() sections of code using Mutex
@@ -107,6 +112,23 @@ fn check_pid_file() -> Result<(), Error> {
         })?;
     }
     Ok(())
+}
+
+fn setup_daemon() -> Result<(), Error> {
+    // Check there's no existing daemon running.
+    check_pid_file()?;
+    
+    let daemonize = Daemonize::new()
+        .pid_file(get_pid_filename())
+        .chown_pid_file(true)
+        .working_directory("/tmp");
+
+    // Attempt to daemonize
+    daemonize.start()
+        .map_err(|e| Error::Fs1541 {
+            message: "Daemonize start failed".into(),
+            error: Fs1541Error::Operation(e.to_string())
+        })
 }
 
 // We'll set worker threads to 8:
@@ -237,7 +259,7 @@ impl Drop for MainCleanupGuard {
     }
 }
 
-fn main() -> Result<(), Error> {
+fn main() -> ExitCode {
     // Set up a cleanup guard to run when this function exits
     let _guard = MainCleanupGuard;
 
@@ -257,26 +279,18 @@ fn main() -> Result<(), Error> {
     let args = Args::new();
 
     if !args.foreground {
-        // Daemonize - must do so before setting up our signal
-        // handler.
-        check_pid_file()?;
-        let daemonize = Daemonize::new()
-            .pid_file(get_pid_filename())
-            .chown_pid_file(true)
-            .working_directory("/tmp");
-
-        match daemonize.start() {
+        // Daemonize
+        match setup_daemon() {
             Ok(_) => {}
             Err(e) => {
-                eprintln!("Failed to dameonize, {}", e);
-                return Err(Error::Fs1541 {
-                    message: "Failed to daemonize".into(),
-                    error: Fs1541Error::Internal(e.to_string()),
-                });
+                let msg = format!("{PKG_BIN_NAME} failed to daemonize");
+                error!("{msg}: {e}");
+                return ExitCode::FAILURE;
             }
         }
     }
-
+    
+    
     // Start the tokio runtime
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(NUM_WORKER_THREADS)
@@ -285,5 +299,15 @@ fn main() -> Result<(), Error> {
         .unwrap();
 
     // Do everything else in async_main
-    runtime.block_on(async_main(args))
+    match runtime.block_on(async_main(args)) {
+        Ok(()) => {
+            info!("{PKG_BIN_NAME} exiting normally");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            let msg = format!("{PKG_BIN_NAME} exiting with an error");
+            error!("{msg}: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
