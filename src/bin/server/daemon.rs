@@ -49,7 +49,10 @@ pub struct Daemon {
     // Mountpoints HashMap.  This is needed by DriveManager (and hence
     // MountService as DriveManager's creator) to check for the existence of
     // an existing mount at a mountpoint
-    mountpoints: Arc<RwLock<HashMap<PathBuf, Arc<RwLock<Mount>>>>>,
+    // Note that Mount must be protected by a parking_lot RwLock not a tokio
+    // one because the fuser thread has to be able to access it, from without
+    // the tokio context
+    mountpoints: Arc<RwLock<HashMap<PathBuf, Arc<parking_lot::RwLock<Mount>>>>>,
 
     // Main tokio runtime
     runtime: Option<Arc<Mutex<Runtime>>>,

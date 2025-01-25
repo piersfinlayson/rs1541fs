@@ -536,7 +536,7 @@ impl Proc {
         shutdown: Arc<AtomicBool>,
         cbm: Arc<Mutex<Cbm>>,
         drive_mgr: Arc<Mutex<DriveManager>>,
-        mountpoints: Arc<RwLock<HashMap<PathBuf, Arc<RwLock<Mount>>>>>,
+        mountpoints: Arc<RwLock<HashMap<PathBuf, Arc<parking_lot::RwLock<Mount>>>>>,
     ) -> Self {
         let mount_svc = MountService::new(cbm.clone(), drive_mgr.clone(), mountpoints);
         Self {

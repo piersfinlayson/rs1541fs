@@ -2,9 +2,10 @@
 
 use rs1541::{CbmDiskHeader, CbmFileEntry};
 use std::time::SystemTime;
+use strum_macros::EnumIter;
 use thiserror::Error;
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum FileError {
     #[error("Other error: {msg}")]
     OtherError { msg: String },
@@ -14,13 +15,13 @@ pub enum FileError {
     NoBuffer { error: String },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum BufferType {
     Read,
     Write,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Buffer {
     buffer_type: BufferType,
     data: Vec<u8>,
@@ -88,7 +89,7 @@ impl Buffer {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, EnumIter)]
 pub enum ControlFilePurpose {
     GetCurDriveStatus,
     GetLastDriveStatus,
@@ -98,14 +99,14 @@ pub enum ControlFilePurpose {
     ExecFormatDrive,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ControlFileType {
     Read,
     Write,
     ReadWrite,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ControlFile {
     purpose: ControlFilePurpose,
     file_type: ControlFileType,
@@ -136,18 +137,35 @@ impl ControlFile {
             buffer,
         }
     }
+
+    pub fn filename(&self) -> String {
+        let unique = match self.purpose {
+            ControlFilePurpose::GetCurDriveStatus => "current_status",
+            ControlFilePurpose::GetLastDriveStatus => "last_status",
+            ControlFilePurpose::GetLastErrorStatus => "last_error_status",
+            ControlFilePurpose::ExecDriveCommand => "execute_command",
+            ControlFilePurpose::ExecDirRefresh => "execute_dir_refresh",
+            ControlFilePurpose::ExecFormatDrive => "execute_format_drive",
+        };
+        match self.file_type {
+            ControlFileType::Read => format!(".{}.r", unique),
+            ControlFileType::Write => format!(".{}.w", unique),
+            ControlFileType::ReadWrite => format!(".{}.rw", unique),
+        }
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum FileEntryType {
     CbmFile(CbmFileEntry),
     CbmHeader(CbmDiskHeader),
     ControlFile(ControlFile),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FuseFile {
     // Common FUSE attributes
+    pub ino: u64,         // Inode number
     pub name: String,     // The name as it appears in the FUSE filesystem
     pub size: u64,        // Size in bytes
     pub permissions: u16, // Unix-style permissions
@@ -156,9 +174,10 @@ pub struct FuseFile {
 }
 
 /// Main object handling file entries, both the FUSE side and 1541fsd/CBM side
+#[derive(Debug, Clone)]
 pub struct FileEntry {
     /// Fuse specific attributes for this file
-    fuse: FuseFile,
+    pub fuse: FuseFile,
 
     /// Native 1541fsd attributes for this file - might be a CBM file or a
     /// dummy/control file
@@ -169,7 +188,7 @@ pub struct FileEntry {
 }
 
 impl FileEntry {
-    pub fn new(name: String, entry_type: FileEntryType) -> Self {
+    pub fn new(name: String, entry_type: FileEntryType, inode: u64) -> Self {
         let (size, permissions, buffer_type) = match &entry_type {
             FileEntryType::CbmFile(file) => {
                 match file {
@@ -197,6 +216,7 @@ impl FileEntry {
                 permissions,
                 modified_time: SystemTime::now(),
                 created_time: SystemTime::now(),
+                ino: inode,
             },
             native: entry_type,
             buffer: buffer_type.map(|bt| match bt {

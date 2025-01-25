@@ -1,7 +1,7 @@
 use crate::bg::Operation;
 use crate::drivemgr::DriveManager;
 use crate::locking_section;
-use crate::mount::Mount;
+use crate::mount::{FuserMount, Mount};
 
 use fs1541::error::{Error, Fs1541Error};
 use rs1541::Cbm;
@@ -20,14 +20,14 @@ use tokio::sync::{mpsc::Sender, Mutex, RwLock};
 pub struct MountService {
     cbm: Arc<Mutex<Cbm>>,
     drive_mgr: Arc<Mutex<DriveManager>>,
-    mountpoints: Arc<RwLock<HashMap<PathBuf, Arc<RwLock<Mount>>>>>,
+    mountpoints: Arc<RwLock<HashMap<PathBuf, Arc<parking_lot::RwLock<Mount>>>>>,
 }
 
 impl MountService {
     pub fn new(
         cbm: Arc<Mutex<Cbm>>,
         drive_mgr: Arc<Mutex<DriveManager>>,
-        mountpoints: Arc<RwLock<HashMap<PathBuf, Arc<RwLock<Mount>>>>>,
+        mountpoints: Arc<RwLock<HashMap<PathBuf, Arc<parking_lot::RwLock<Mount>>>>>,
     ) -> Self {
         MountService {
             cbm,
@@ -61,7 +61,7 @@ impl MountService {
         )?;
 
         // Now mount it - if fails we have to remove it from the DriveManager
-        let mount = match mount.mount().await {
+        let mount_options = match mount.mount().await {
             Ok(mount) => mount,
             Err(e) => {
                 warn!("Mount failed after drive was added - removing");
@@ -75,10 +75,28 @@ impl MountService {
             }
         };
 
+        // Now create an Arc<RwLock<Mount>>
+        let shared_mount = Arc::new(parking_lot::RwLock::new(mount));
+
+        // Now create the FuserMount object to pass to fuser
+        let fuser_mount = FuserMount::new(shared_mount.clone());
+        let fuser = fuser::spawn_mount2(fuser_mount, &mountpoint, &mount_options).map_err(|e| {
+            Error::Io {
+                message: "Failed to spawn FUSE mount".to_string(),
+                error: e.to_string(),
+            }
+        })?;
+
+        // Add fuser thread to mount object
+        locking_section!("Write", "Mount", {
+            let mut mount = shared_mount.write();
+            mount.update_fuser(fuser);
+        });
+
         // Now it's mounted, add it to the mountpoints HashMap
         locking_section!("Lock", "Mountpoints", {
             let mut mps = self.mountpoints.write().await;
-            match mps.insert(mountpoint.as_ref().to_path_buf(), mount) {
+            match mps.insert(mountpoint.as_ref().to_path_buf(), shared_mount) {
                 None => Ok(()), // No previous value, success
                 Some(_) => {
                     warn!(
@@ -107,7 +125,7 @@ impl MountService {
     pub async fn get_mount<P: AsRef<Path>>(
         &self,
         mountpoint: P,
-    ) -> Result<Arc<RwLock<Mount>>, Error> {
+    ) -> Result<Arc<parking_lot::RwLock<Mount>>, Error> {
         trace!("Getting mount {}", mountpoint.as_ref().to_string_lossy());
         locking_section!("Lock", "Mountpoints", {
             let mountpoints = self.mountpoints.read().await;
@@ -127,12 +145,12 @@ impl MountService {
     pub async fn get_mount_from_device_num(
         &self,
         device_number: u8,
-    ) -> Result<Arc<RwLock<Mount>>, Error> {
+    ) -> Result<Arc<parking_lot::RwLock<Mount>>, Error> {
         let mount = locking_section!("Lock", "Mountpoints", {
             let mps = self.mountpoints.read().await;
             for (_path, mps_mount) in mps.iter() {
                 let mount_match = locking_section!("Lock", "Mount", {
-                    let mps_mount_guard = mps_mount.read().await;
+                    let mps_mount_guard = mps_mount.read();
                     if mps_mount_guard.get_device_num() == device_number {
                         debug!(
                             "Found matching mount {} at device {}",
@@ -189,7 +207,7 @@ impl MountService {
             match mount.clone() {
                 Some(mount) => {
                     locking_section!("Lock", "Mount", {
-                        let mount_guard = mount.read().await;
+                        let mount_guard = mount.read();
                         Some(mount_guard.get_device_num())
                     })
                 }
@@ -211,7 +229,7 @@ impl MountService {
         // Now we have a device_number and mount, as u8 and Arc<Mutex<Mount>>.
         // Unmount the drive
         locking_section!("Lock", "Mount", {
-            mount.write().await.unmount();
+            mount.write().unmount();
         });
 
         // Next step is to remove the drive. We do this first in case the
@@ -233,7 +251,7 @@ impl MountService {
         // Now remove it
         locking_section!("Lock", "Mountpoints", {
             let mut mps = self.mountpoints.write().await;
-            let mount_guard = mount.read().await;
+            let mount_guard = mount.read();
             match mps.remove(mount_guard.get_mountpoint()) {
                 Some(_) => (), // Successfully removed
                 None => unreachable!(),

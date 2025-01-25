@@ -6,11 +6,12 @@ use rs1541::{Cbm, CbmDriveUnit, CbmErrorNumber};
 use crate::args::get_args;
 use crate::bg::Operation;
 use crate::drivemgr::DriveManager;
+use crate::file::{ControlFile, ControlFilePurpose, FileEntry, FileEntryType};
 use crate::locking_section;
 
 use fuser::{
-    spawn_mount2, BackgroundSession, FileAttr, Filesystem, MountOption, ReplyAttr, ReplyData,
-    ReplyDirectory, ReplyEntry, Request,
+    BackgroundSession, FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData,
+    ReplyDirectory, ReplyEntry, Request, FUSE_ROOT_ID,
 };
 use log::{debug, info, trace, warn};
 use std::collections::HashMap;
@@ -19,6 +20,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use strum::IntoEnumIterator;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::{Mutex, RwLock};
 
@@ -30,7 +32,7 @@ const NUM_MOUNT_RX_CHANNELS: usize = 2;
 /// tracking when it was last updated.
 #[derive(Debug, Clone)]
 pub struct DirectoryCache {
-    entries: HashMap<String, FileAttr>,
+    _entries: HashMap<String, FileAttr>,
     _last_updated: std::time::SystemTime,
 }
 
@@ -38,7 +40,7 @@ pub struct DirectoryCache {
 ///
 /// Manages the connection between a physical drive unit and its
 /// representation in the Linux filesystem.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 #[allow(dead_code)]
 pub struct Mount {
     device_num: u8,
@@ -52,6 +54,8 @@ pub struct Mount {
     bg_rsp_rx: Arc<Mutex<Receiver<Result<(), Error>>>>,
     directory_cache: Arc<RwLock<DirectoryCache>>,
     fuser: Option<Arc<Mutex<BackgroundSession>>>,
+    files: Vec<FileEntry>,
+    next_inode: u64,
 }
 
 impl fmt::Display for Mount {
@@ -91,12 +95,12 @@ impl Mount {
 
         // Create directory cache
         let dir_cache = Arc::new(RwLock::new(DirectoryCache {
-            entries: HashMap::new(),
+            _entries: HashMap::new(),
             _last_updated: SystemTime::now(),
         }));
 
         // Create Mount
-        Ok(Self {
+        let mut mount = Ok(Self {
             device_num,
             mountpoint: mountpoint.as_ref().to_path_buf(),
             _dummy_formats: dummy_formats,
@@ -108,7 +112,14 @@ impl Mount {
             bg_rsp_rx: shared_rx,
             directory_cache: dir_cache,
             fuser: None,
-        })
+            files: Vec::new(),
+            next_inode: FUSE_ROOT_ID + 1,
+        })?;
+
+        // Create the control files
+        mount.init_control_files();
+
+        Ok(mount)
     }
 
     /*
@@ -120,6 +131,27 @@ impl Mount {
     }
     */
 
+    fn allocate_inode(&mut self) -> u64 {
+        let inode = self.next_inode;
+        self.next_inode += 1;
+        inode
+    }
+
+    fn init_control_files(&mut self) {
+        assert_eq!(self.files.len(), 0);
+        for purpose in ControlFilePurpose::iter() {
+            let control_file = ControlFile::new(purpose);
+            let file_entry = FileEntry::new(
+                control_file.filename(),
+                FileEntryType::ControlFile(control_file),
+                self.allocate_inode(),
+            );
+            self.files.push(file_entry);
+        }
+        debug!("Have {} files", self.files.len());
+        debug!("Next inode {}", self.next_inode);
+    }
+
     pub fn get_device_num(&self) -> u8 {
         self.device_num
     }
@@ -128,7 +160,7 @@ impl Mount {
         &self.mountpoint
     }
 
-    async fn create_fuser(&mut self) -> Result<(), Error> {
+    async fn create_fuser_mount_options(&self) -> Result<Vec<MountOption>, Error> {
         if self.fuser.is_some() {
             return Err(Error::Fs1541 {
                 message: "Failed to create fuser".to_string(),
@@ -155,17 +187,7 @@ impl Mount {
             options.push(MountOption::AutoUnmount);
         }
 
-        // Call fuser to mount this mountpoint
-        let fuser = spawn_mount2(self.clone(), self.mountpoint.clone(), &options).map_err(|e| {
-            Error::Io {
-                message: "Failed to spawn FUSE mount".to_string(),
-                error: e.to_string(),
-            }
-        })?;
-
-        self.fuser = Some(Arc::new(Mutex::new(fuser)));
-
-        Ok(())
+        Ok(options)
     }
 
     // This mount function is async because locking is required - we have to
@@ -174,7 +196,7 @@ impl Mount {
     // there's no trade off, and it seems a bit more intuitive that the Mount
     // may block.  OTOH it shouldn't because the drive_unit really shouldn't
     // be in use at this point.
-    pub async fn mount(&mut self) -> Result<Arc<RwLock<Mount>>, Error> {
+    pub async fn mount(&mut self) -> Result<Vec<MountOption>, Error> {
         debug!("Mount {} instructed to mount", self);
 
         // Double check we're not already running in fuser
@@ -268,26 +290,8 @@ impl Mount {
             drive_num += 1;
         }
 
-        // Create a shared mutex for self, as this is what we'll need to
-        // return
-        let mount = Arc::new(RwLock::new(self.clone()));
-
-        // Now we've verified the drive exists, and we can talk it, create
-        // the fuser thread.  We need to create the fuser thread from that
-        // version of mount, so it doesn't consume it
-        let mount_clone = mount.clone();
-        locking_section!("Lock", "Mount", {
-            let mut mount_clone = mount_clone.write().await;
-            mount_clone
-                .create_fuser()
-                .await
-                .inspect_err(|e| debug!("Failed to create fuser thread for mount {}", e))?;
-        });
-
-        // TO DO
-        // kick off a directory read, in a separate thread
-
-        Ok(mount)
+        // Now return the mount options
+        Ok(self.create_fuser_mount_options().await?)
     }
 
     // This code is really unncessary - dropping Mount should cause fuser to
@@ -295,7 +299,8 @@ impl Mount {
     pub fn unmount(&mut self) {
         debug!("Mount {} unmounting", self);
         // Setting fuser to None will cause the fuser BackgroundSession to
-        // drop, in turn causing fuser to exit for this mount
+        // drop (as this is the only instance), in turn causing fuser to exit
+        // for this mount
         self.fuser = None;
     }
 
@@ -317,42 +322,163 @@ impl Mount {
             )
         })
     }
+
+    pub fn update_fuser(&mut self, fuser: BackgroundSession) {
+        self.fuser = Some(Arc::new(Mutex::new(fuser)));
+    }
+}
+
+pub struct FuserMount {
+    mount: Arc<parking_lot::RwLock<Mount>>,
+}
+
+impl FuserMount {
+    pub fn new(mount: Arc<parking_lot::RwLock<Mount>>) -> Self {
+        FuserMount { mount }
+    }
 }
 
 //
-impl Filesystem for Mount {
-    fn lookup(&mut self, _req: &Request, _parent: u64, name: &OsStr, reply: ReplyEntry) {
-        // Implementation for looking up files/directories
-        let guard = self.directory_cache.blocking_read();
-
-        if let Some(attr) = guard.entries.get(name.to_str().unwrap_or("")) {
-            reply.entry(&Duration::new(1, 0), attr, 0);
-        } else {
+impl Filesystem for FuserMount {
+    fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
+        if parent != FUSE_ROOT_ID {
             reply.error(libc::ENOENT);
+            return;
         }
+
+        // Convert OsStr to String
+        let name = match name.to_str() {
+            Some(n) => n,
+            None => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        };
+
+        // Find file by name
+        locking_section!("Read", "Mount", {
+            let mount = self.mount.read();
+            if let Some(file) = mount.files.iter().find(|f| f.fuse.name == name) {
+                let attr = FileAttr {
+                    ino: file.fuse.ino,
+                    size: file.fuse.size,
+                    blocks: (file.fuse.size + 511) / 512,
+                    atime: SystemTime::now(),
+                    mtime: file.fuse.modified_time,
+                    ctime: file.fuse.modified_time,
+                    crtime: file.fuse.created_time,
+                    kind: FileType::RegularFile,
+                    perm: file.fuse.permissions,
+                    nlink: 1,
+                    uid: unsafe { libc::getuid() },
+                    gid: unsafe { libc::getgid() },
+                    rdev: 0,
+                    flags: 0,
+                    blksize: 512,
+                };
+
+                reply.entry(&Duration::new(1, 0), &attr, 0);
+            } else {
+                reply.error(libc::ENOENT);
+            }
+        });
     }
 
-    fn getattr(&mut self, _req: &Request, _ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
-        // Implementation for getting file/directory attributes
-        // You'll need to map between inode numbers and your cache entries
-        //if let Some(attr) = self.find_attr_by_ino(ino) {
-        //    reply.attr(&Duration::new(1, 0), attr);
-        //} else {
+    fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
+        if ino == FUSE_ROOT_ID {
+            let attr = FileAttr {
+                ino: 1,
+                size: 0,
+                blocks: 0,
+                atime: SystemTime::now(),  // Access time
+                mtime: SystemTime::now(),  // Modification time
+                ctime: SystemTime::now(),  // Status change time
+                crtime: SystemTime::now(), // Creation time
+                kind: FileType::Directory,
+                perm: 0o755, // Standard directory permissions
+                nlink: 2,    // . and ..
+                uid: unsafe { libc::getuid() },
+                gid: unsafe { libc::getgid() },
+                rdev: 0,
+                flags: 0,
+                blksize: 512,
+            };
+            reply.attr(&Duration::new(1, 0), &attr);
+            return;
+        }
+
+        locking_section!("Read", "Mount", {
+            let mount = self.mount.read();
+
+            // Look up file attributes by inode
+            if let Some(file_entry) = mount.files.iter().find(|f| f.fuse.ino == ino) {
+                let attr = FileAttr {
+                    ino: ino,
+                    size: file_entry.fuse.size,
+                    blocks: (file_entry.fuse.size + 511) / 512, // Round up to nearest block
+                    atime: SystemTime::now(), // Could be stored in FuseFile if needed
+                    mtime: file_entry.fuse.modified_time,
+                    ctime: file_entry.fuse.modified_time, // Using modified time for change time
+                    crtime: file_entry.fuse.created_time,
+                    kind: FileType::RegularFile,
+                    perm: file_entry.fuse.permissions,
+                    nlink: 1,
+                    uid: unsafe { libc::getuid() },
+                    gid: unsafe { libc::getgid() },
+                    rdev: 0,
+                    flags: 0,
+                    blksize: 512,
+                };
+                reply.attr(&Duration::new(1, 0), &attr);
+                return;
+            }
+        });
+
+        // File not found
         reply.error(libc::ENOENT);
-        //}
     }
 
     fn readdir(
         &mut self,
         _req: &Request,
-        _ino: u64,
+        ino: u64,
         _fh: u64,
-        _offset: i64,
-        reply: ReplyDirectory,
+        offset: i64,
+        mut reply: ReplyDirectory,
     ) {
-        // Implementation for reading directory contents
-        // You'll need to handle the offset and implement proper directory listing
-        reply.error(libc::ENOENT);
+        if ino != FUSE_ROOT_ID {
+            reply.error(libc::ENOTDIR);
+            return;
+        }
+
+        let entries = vec![
+            (FUSE_ROOT_ID, FileType::Directory, "."),
+            (FUSE_ROOT_ID, FileType::Directory, ".."),
+        ];
+
+        locking_section!("Read", "Mount", {
+            let mount = self.mount.read();
+
+            // Add all files
+            let all_entries: Vec<_> = entries
+                .into_iter()
+                .chain(
+                    mount
+                        .files
+                        .iter()
+                        .map(|f| (f.fuse.ino, FileType::RegularFile, f.fuse.name.as_str())),
+                )
+                .collect();
+
+            // Skip entries before offset
+            for (i, entry) in all_entries.into_iter().enumerate().skip(offset as usize) {
+                let (ino, kind, name) = entry;
+                if reply.add(ino, (i + 1) as i64, kind, name) {
+                    return;
+                }
+            }
+            reply.ok();
+        });
     }
 
     fn read(
