@@ -1,6 +1,6 @@
 use crate::locking_section;
 use fs1541::error::{Error, Fs1541Error};
-use rs1541::{Cbm, CbmDeviceInfo, CbmDriveUnit, CbmStatus, Rs1541ErrorNumber};
+use rs1541::{Cbm, CbmDeviceInfo, CbmDriveUnit, CbmStatus, CbmErrorNumber};
 use rs1541::{MAX_DEVICE_NUM, MIN_DEVICE_NUM};
 
 use log::{debug, error, info, trace, warn};
@@ -187,7 +187,7 @@ impl DriveManager {
     pub async fn init_drive(
         &self,
         device_number: u8,
-        ignore: &Vec<Rs1541ErrorNumber>,
+        ignore: &Vec<CbmErrorNumber>,
     ) -> Result<Vec<Result<CbmStatus, Error>>, Error> {
         locking_section!("Lock", "Cbm and Drive Manager", {
             let mut cbm = self.cbm.lock().await.clone();

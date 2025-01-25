@@ -1,7 +1,7 @@
 use fs1541::error::{Error, Fs1541Error};
 use fs1541::validate::{validate_mountpoint, ValidationType};
 use rs1541::{validate_device, DeviceValidation};
-use rs1541::{Cbm, CbmDriveUnit, Rs1541ErrorNumber};
+use rs1541::{Cbm, CbmDriveUnit, CbmErrorNumber};
 
 use crate::args::get_args;
 use crate::bg::Operation;
@@ -207,15 +207,15 @@ impl Mount {
         // We don't need to provide Ok here - is won't be treated as an error
         // anyway
         let ignore = vec![
-            Rs1541ErrorNumber::ReadErrorBlockHeaderNotFound,
-            Rs1541ErrorNumber::ReadErrorNoSyncCharacter,
-            Rs1541ErrorNumber::ReadErrorDataBlockNotPresent,
-            Rs1541ErrorNumber::ReadErrorChecksumErrorInDataBlock,
-            Rs1541ErrorNumber::ReadErrorByteDecodingError,
-            Rs1541ErrorNumber::ReadErrorChecksumErrorInHeader,
-            Rs1541ErrorNumber::DiskIdMismatch,
-            Rs1541ErrorNumber::DosMismatch,
-            Rs1541ErrorNumber::DriveNotReady,
+            CbmErrorNumber::ReadErrorBlockHeaderNotFound,
+            CbmErrorNumber::ReadErrorNoSyncCharacter,
+            CbmErrorNumber::ReadErrorDataBlockNotPresent,
+            CbmErrorNumber::ReadErrorChecksumErrorInDataBlock,
+            CbmErrorNumber::ReadErrorByteDecodingError,
+            CbmErrorNumber::ReadErrorChecksumErrorInHeader,
+            CbmErrorNumber::DiskIdMismatch,
+            CbmErrorNumber::DosMismatch,
+            CbmErrorNumber::DriveNotReady,
         ];
 
         // Init the drive

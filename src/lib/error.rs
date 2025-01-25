@@ -1,5 +1,5 @@
 /// Contains [`fs1541`] error types
-use rs1541::Rs1541Error;
+use rs1541::Error as Rs1541Error;
 use serde::{Deserialize, Serialize};
 use thiserror::Error as ThisError;
 
