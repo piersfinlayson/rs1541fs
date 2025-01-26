@@ -1,16 +1,18 @@
 use crate::bg::Operation;
 use crate::drivemgr::DriveManager;
+use crate::fusermount::FuserMount;
 use crate::locking_section;
-use crate::mount::{FuserMount, Mount};
+use crate::mount::Mount;
 
 use fs1541::error::{Error, Fs1541Error};
 use rs1541::Cbm;
 
+use flume::Sender;
 use log::{debug, info, trace, warn};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::{mpsc::Sender, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock};
 
 /// Service that sits above DeviceManager and Mount to manage lifecycle of
 /// CbmDeviceUnit and Mount objects - as Mount lifecycle operations require
@@ -91,6 +93,8 @@ impl MountService {
         locking_section!("Write", "Mount", {
             let mut mount = shared_mount.write();
             mount.update_fuser(fuser);
+            mount.set_shared_self(shared_mount.clone())?;
+            mount.create_bg_response_thread()?;
         });
 
         // Now it's mounted, add it to the mountpoints HashMap

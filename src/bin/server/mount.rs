@@ -1,27 +1,26 @@
 use fs1541::error::{Error, Fs1541Error};
 use fs1541::validate::{validate_mountpoint, ValidationType};
 use rs1541::{validate_device, DeviceValidation};
-use rs1541::{Cbm, CbmDriveUnit, CbmErrorNumber};
+use rs1541::{Cbm, CbmDirListing, CbmDriveUnit, CbmErrorNumber, CbmErrorNumberOk, CbmFileEntry};
 
 use crate::args::get_args;
-use crate::bg::Operation;
+use crate::bg::{OpResponse, OpResponseType, OpType, Operation};
 use crate::drivemgr::DriveManager;
 use crate::file::{ControlFile, ControlFilePurpose, FileEntry, FileEntryType};
+use crate::fusermount::Xattrs;
 use crate::locking_section;
 
-use fuser::{
-    BackgroundSession, FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData,
-    ReplyDirectory, ReplyEntry, Request, FUSE_ROOT_ID,
-};
+use fuser::{BackgroundSession, FileAttr, MountOption, FUSE_ROOT_ID};
 use log::{debug, info, trace, warn};
 use std::collections::HashMap;
-use std::ffi::OsStr;
+
+use flume::{Receiver, Sender};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::thread::JoinHandle;
+use std::time::SystemTime;
 use strum::IntoEnumIterator;
-use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::{Mutex, RwLock};
 
 const NUM_MOUNT_RX_CHANNELS: usize = 2;
@@ -50,12 +49,16 @@ pub struct Mount {
     drive_mgr: Arc<Mutex<DriveManager>>,
     drive_unit: Arc<RwLock<CbmDriveUnit>>,
     bg_proc_tx: Arc<Sender<Operation>>,
-    bg_rsp_tx: Arc<Sender<Result<(), Error>>>,
-    bg_rsp_rx: Arc<Mutex<Receiver<Result<(), Error>>>>,
+    bg_rsp_tx: Arc<Sender<OpResponse>>,
+    bg_rsp_rx: Option<Receiver<OpResponse>>,
     directory_cache: Arc<RwLock<DirectoryCache>>,
     fuser: Option<Arc<Mutex<BackgroundSession>>>,
     files: Vec<FileEntry>,
     next_inode: u64,
+    shared_self: Option<Arc<parking_lot::RwLock<Mount>>>,
+    bg_rsp_handle: Option<JoinHandle<()>>,
+    dir_outstanding: bool,
+    xattrs: Vec<Xattrs>,
 }
 
 impl fmt::Display for Mount {
@@ -85,13 +88,11 @@ impl Mount {
         drive_unit: Arc<RwLock<CbmDriveUnit>>,
         bg_proc_tx: Arc<Sender<Operation>>,
     ) -> Result<Self, Error> {
-        // Create a mpsc::Channel for receiving reponses from Background
-        // Process
-        let (tx, rx) = mpsc::channel(NUM_MOUNT_RX_CHANNELS);
-
-        // We have to Arc<Mutex<rx>>, because we want to clone Mount into the
-        // fuser thread
-        let shared_rx = Arc::new(Mutex::new(rx));
+        // Create a flume channel for receiving reponses from Background
+        // Process.  We use flume because it supports both async and sync
+        // contexts - and we need to use it from within the fuser context
+        // which is sync.
+        let (tx, rx) = flume::bounded(NUM_MOUNT_RX_CHANNELS);
 
         // Create directory cache
         let dir_cache = Arc::new(RwLock::new(DirectoryCache {
@@ -109,11 +110,15 @@ impl Mount {
             drive_unit,
             bg_proc_tx,
             bg_rsp_tx: Arc::new(tx),
-            bg_rsp_rx: shared_rx,
+            bg_rsp_rx: Some(rx),
             directory_cache: dir_cache,
             fuser: None,
             files: Vec::new(),
             next_inode: FUSE_ROOT_ID + 1,
+            shared_self: None,
+            bg_rsp_handle: None,
+            dir_outstanding: false,
+            xattrs: Vec::new(),
         })?;
 
         // Create the control files
@@ -148,7 +153,7 @@ impl Mount {
             );
             self.files.push(file_entry);
         }
-        debug!("Have {} files", self.files.len());
+        debug!("Have {} control files", self.files.len());
         debug!("Next inode {}", self.next_inode);
     }
 
@@ -265,9 +270,16 @@ impl Mount {
             return Err(Error::Fs1541 { message, error: Fs1541Error::Operation("init_drive() returned OK, but no status response(s) - perhas the device has no drives?".to_string()) });
         }
         let mut drive_num = 0;
+        let mut init_succeeded = false;
         for drive_res in result_vec {
             match drive_res {
-                Ok(_) => {
+                Ok(status) => {
+                    if status.is_ok() == CbmErrorNumberOk::Ok {
+                        // Init for this drive unit got an OK response - it is
+                        // worth us attempting a dir
+                        init_succeeded = true;
+                        debug!("Drive unit {drive_num} received OK response to init - we will do a dir");
+                    }
                     trace!(
                         "Init succeeded for device {} drive unit {drive_num}",
                         self.device_num
@@ -290,6 +302,10 @@ impl Mount {
             drive_num += 1;
         }
 
+        if init_succeeded {
+            self.do_dir().await;
+        }
+
         // Now return the mount options
         Ok(self.create_fuser_mount_options().await?)
     }
@@ -301,6 +317,8 @@ impl Mount {
         // Setting fuser to None will cause the fuser BackgroundSession to
         // drop (as this is the only instance), in turn causing fuser to exit
         // for this mount
+        self.bg_rsp_handle = None;
+        self.shared_self = None;
         self.fuser = None;
     }
 
@@ -326,173 +344,177 @@ impl Mount {
     pub fn update_fuser(&mut self, fuser: BackgroundSession) {
         self.fuser = Some(Arc::new(Mutex::new(fuser)));
     }
-}
 
-pub struct FuserMount {
-    mount: Arc<parking_lot::RwLock<Mount>>,
-}
-
-impl FuserMount {
-    pub fn new(mount: Arc<parking_lot::RwLock<Mount>>) -> Self {
-        FuserMount { mount }
+    async fn do_dir(&mut self) {
+        // Send a request off to the BG processor to read the directory (and
+        // reply back to us when done)
+        let op = Operation::new(
+            OpType::ReadDirectory {
+                drive_unit: self.drive_unit.clone(),
+            },
+            self.bg_rsp_tx.clone(),
+            None,
+        );
+        match self.bg_proc_tx.send_async(op).await {
+            Ok(_) => {
+                debug!("Sent read directory request to BG processor");
+                self.dir_outstanding = true;
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to send read directory request to BG processor: {}",
+                    e
+                );
+            }
+        }
     }
-}
 
-//
-impl Filesystem for FuserMount {
-    fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        if parent != FUSE_ROOT_ID {
-            reply.error(libc::ENOENT);
-            return;
+    pub fn set_shared_self(
+        &mut self,
+        shared_self: Arc<parking_lot::RwLock<Mount>>,
+    ) -> Result<(), Error> {
+        if self.shared_self.is_some() {
+            Err(Error::Fs1541 {
+                message: "Failed to set Mount shared self".into(),
+                error: Fs1541Error::Internal("Mount shared self already exists".into()),
+            })
+        } else {
+            self.shared_self = Some(shared_self);
+            Ok(())
+        }
+    }
+
+    pub fn create_bg_response_thread(&mut self) -> Result<(), Error> {
+        if self.shared_self.is_none() || self.bg_rsp_rx.is_none() {
+            return Err(Error::Fs1541 {
+                message: "Cannot create Mount BG processor response thread".into(),
+                error: Fs1541Error::Internal(
+                    "Missing either Mount shared self or BG response receiver, or both".into(),
+                ),
+            });
+        }
+        if self.bg_rsp_handle.is_some() {
+            return Err(Error::Fs1541 {
+                message: "Cannot create Mount BG processor response thread".into(),
+                error: Fs1541Error::Internal("Already exists".into()),
+            });
         }
 
-        // Convert OsStr to String
-        let name = match name.to_str() {
-            Some(n) => n,
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
+        let bg_rsp_rx = self.bg_rsp_rx.take().unwrap();
+        let shared_self = self.shared_self.clone().unwrap();
+        let mountpoint = self.mountpoint.clone();
+        // Get a runtime handle that can be moved into the thread
+        let runtime = tokio::runtime::Handle::current();
+
+        let join_handle = std::thread::spawn(move || {
+            // Create a blocking task in this thread that runs our async code
+            runtime
+                .block_on(async { Self::handle_bg_responses(shared_self, bg_rsp_rx, mountpoint) })
+        });
+
+        self.bg_rsp_handle = Some(join_handle);
+
+        Ok(())
+    }
+
+    fn process_bg_response(shared_self: Arc<parking_lot::RwLock<Mount>>, response: OpResponse) {
+        let rsp = if let Err(e) = response.rsp {
+            warn!("Received BG processor Error response: {}", e);
+            return;
+        } else {
+            response.rsp.unwrap()
         };
 
-        // Find file by name
-        locking_section!("Read", "Mount", {
-            let mount = self.mount.read();
-            if let Some(file) = mount.files.iter().find(|f| f.fuse.name == name) {
-                let attr = FileAttr {
-                    ino: file.fuse.ino,
-                    size: file.fuse.size,
-                    blocks: (file.fuse.size + 511) / 512,
-                    atime: SystemTime::now(),
-                    mtime: file.fuse.modified_time,
-                    ctime: file.fuse.modified_time,
-                    crtime: file.fuse.created_time,
-                    kind: FileType::RegularFile,
-                    perm: file.fuse.permissions,
-                    nlink: 1,
-                    uid: unsafe { libc::getuid() },
-                    gid: unsafe { libc::getgid() },
-                    rdev: 0,
-                    flags: 0,
-                    blksize: 512,
-                };
-
-                reply.entry(&Duration::new(1, 0), &attr, 0);
-            } else {
-                reply.error(libc::ENOENT);
+        match rsp {
+            OpResponseType::ReadDirectory { listings } => {
+                locking_section!("RwLock", "Mount", {
+                    let mut guard = shared_self.write();
+                    if !guard.dir_outstanding {
+                        warn!("Received ReadDirectory listing when one wasn't outstanding");
+                    }
+                    guard.dir_outstanding = false;
+                    guard.process_directory_listings(listings);
+                });
             }
-        });
-    }
-
-    fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
-        if ino == FUSE_ROOT_ID {
-            let attr = FileAttr {
-                ino: 1,
-                size: 0,
-                blocks: 0,
-                atime: SystemTime::now(),  // Access time
-                mtime: SystemTime::now(),  // Modification time
-                ctime: SystemTime::now(),  // Status change time
-                crtime: SystemTime::now(), // Creation time
-                kind: FileType::Directory,
-                perm: 0o755, // Standard directory permissions
-                nlink: 2,    // . and ..
-                uid: unsafe { libc::getuid() },
-                gid: unsafe { libc::getgid() },
-                rdev: 0,
-                flags: 0,
-                blksize: 512,
-            };
-            reply.attr(&Duration::new(1, 0), &attr);
-            return;
+            _ => {
+                warn!("Unexpected response from BG processor: {:?}", rsp);
+            }
         }
-
-        locking_section!("Read", "Mount", {
-            let mount = self.mount.read();
-
-            // Look up file attributes by inode
-            if let Some(file_entry) = mount.files.iter().find(|f| f.fuse.ino == ino) {
-                let attr = FileAttr {
-                    ino: ino,
-                    size: file_entry.fuse.size,
-                    blocks: (file_entry.fuse.size + 511) / 512, // Round up to nearest block
-                    atime: SystemTime::now(), // Could be stored in FuseFile if needed
-                    mtime: file_entry.fuse.modified_time,
-                    ctime: file_entry.fuse.modified_time, // Using modified time for change time
-                    crtime: file_entry.fuse.created_time,
-                    kind: FileType::RegularFile,
-                    perm: file_entry.fuse.permissions,
-                    nlink: 1,
-                    uid: unsafe { libc::getuid() },
-                    gid: unsafe { libc::getgid() },
-                    rdev: 0,
-                    flags: 0,
-                    blksize: 512,
-                };
-                reply.attr(&Duration::new(1, 0), &attr);
-                return;
-            }
-        });
-
-        // File not found
-        reply.error(libc::ENOENT);
     }
 
-    fn readdir(
-        &mut self,
-        _req: &Request,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
-        mut reply: ReplyDirectory,
+    pub fn handle_bg_responses(
+        shared_self: Arc<parking_lot::RwLock<Mount>>,
+        rx: Receiver<OpResponse>,
+        mountpoint: PathBuf,
     ) {
-        if ino != FUSE_ROOT_ID {
-            reply.error(libc::ENOTDIR);
-            return;
-        }
-
-        let entries = vec![
-            (FUSE_ROOT_ID, FileType::Directory, "."),
-            (FUSE_ROOT_ID, FileType::Directory, ".."),
-        ];
-
-        locking_section!("Read", "Mount", {
-            let mount = self.mount.read();
-
-            // Add all files
-            let all_entries: Vec<_> = entries
-                .into_iter()
-                .chain(
-                    mount
-                        .files
-                        .iter()
-                        .map(|f| (f.fuse.ino, FileType::RegularFile, f.fuse.name.as_str())),
-                )
-                .collect();
-
-            // Skip entries before offset
-            for (i, entry) in all_entries.into_iter().enumerate().skip(offset as usize) {
-                let (ino, kind, name) = entry;
-                if reply.add(ino, (i + 1) as i64, kind, name) {
-                    return;
+        loop {
+            match rx.recv() {
+                Ok(response) => Self::process_bg_response(shared_self.clone(), response),
+                Err(e) => {
+                    warn!("BG processor response channel closed, exiting: {}", e);
+                    break;
                 }
             }
-            reply.ok();
-        });
+        }
+        info!(
+            "Mount: {} Background response handler thread exiting",
+            mountpoint.display()
+        );
     }
 
-    fn read(
-        &mut self,
-        _req: &Request,
-        _ino: u64,
-        _fh: u64,
-        _offset: i64,
-        _size: u32,
-        _flags: i32,
-        _lock: Option<u64>,
-        reply: ReplyData,
-    ) {
-        reply.data(b"Hello World!\n");
+    fn process_directory_listings(&mut self, listings: Vec<CbmDirListing>) {
+        let mut drives: Vec<Vec<FileEntry>> = vec![Vec::new(); 2]; // Initialize vec for drives 0 and 1
+
+        for listing in listings {
+            let drive_num = listing.header.drive_number as usize;
+            if drive_num > 1 {
+                continue; // Skip invalid drive numbers
+            }
+
+            // Add xattrs first
+            self.xattrs = Xattrs::create_user(
+                &listing.header.name,
+                &listing.header.id,
+                listing.blocks_free,
+            );
+            debug!("Added xattrs: {:?}", self.xattrs);
+
+            // Process each file in the listing
+            for (idx, file) in listing.files.iter().enumerate() {
+                let file_entry = FileEntry::new(
+                    match file {
+                        CbmFileEntry::ValidFile { filename, .. } => filename.clone(),
+                        CbmFileEntry::InvalidFile {
+                            partial_filename, ..
+                        } => partial_filename
+                            .clone()
+                            .unwrap_or_else(|| format!("INVALID_{}", idx)),
+                    },
+                    FileEntryType::CbmFile(file.clone()),
+                    self.allocate_inode(),
+                );
+                trace!(
+                    "Adding file entry: {} inode: {}",
+                    file_entry.fuse.name,
+                    file_entry.fuse.ino
+                );
+                drives[drive_num].push(file_entry);
+            }
+        }
+
+        self.files = Vec::new();
+        self.init_control_files();
+        for drive in drives {
+            self.files.extend(drive);
+        }
+    }
+
+    pub fn files(&self) -> &Vec<FileEntry> {
+        &self.files
+    }
+
+    pub fn xattrs(&self) -> &Vec<Xattrs> {
+        &self.xattrs
     }
 }
 

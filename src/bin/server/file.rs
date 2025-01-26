@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use rs1541::{CbmDiskHeader, CbmFileEntry};
+use rs1541::{CbmDiskHeader, CbmFileEntry, CbmFileType};
 use std::time::SystemTime;
 use strum_macros::EnumIter;
 use thiserror::Error;
@@ -173,6 +173,18 @@ pub struct FuseFile {
     pub created_time: SystemTime,
 }
 
+impl FuseFile {
+    pub fn fuse_suffix(file_type: &CbmFileType) -> &'static str {
+        match file_type {
+            CbmFileType::PRG => ".prg",
+            CbmFileType::SEQ => ".seq",
+            CbmFileType::USR => ".usr",
+            CbmFileType::REL => ".rel",
+            CbmFileType::Unknown => "",
+        }
+    }
+}
+
 /// Main object handling file entries, both the FUSE side and 1541fsd/CBM side
 #[derive(Debug, Clone)]
 pub struct FileEntry {
@@ -181,21 +193,23 @@ pub struct FileEntry {
 
     /// Native 1541fsd attributes for this file - might be a CBM file or a
     /// dummy/control file
-    native: FileEntryType,
+    pub native: FileEntryType,
 
     /// Used to buffer up read or write operations
     buffer: Option<Buffer>,
 }
 
 impl FileEntry {
-    pub fn new(name: String, entry_type: FileEntryType, inode: u64) -> Self {
+    pub fn new(mut name: String, entry_type: FileEntryType, inode: u64) -> Self {
         let (size, permissions, buffer_type) = match &entry_type {
             FileEntryType::CbmFile(file) => {
+                let filesize = file.max_size().unwrap_or(0);
                 match file {
-                    CbmFileEntry::ValidFile { blocks, .. } => {
-                        ((*blocks as u64) * 254, 0o444, Some(BufferType::Write))
-                    } // Writable buffer for CBM files
-                    CbmFileEntry::InvalidFile { .. } => (0, 0o000, None),
+                    CbmFileEntry::ValidFile { file_type, .. } => {
+                        name.push_str(FuseFile::fuse_suffix(file_type));
+                        (filesize, 0o444, Some(BufferType::Write))
+                    }
+                    CbmFileEntry::InvalidFile { .. } => (filesize, 0o000, None),
                 }
             }
             FileEntryType::CbmHeader(_) => (0, 0o444, None),
@@ -203,7 +217,7 @@ impl FileEntry {
                 let (perms, buf_type) = match ctrl.file_type {
                     ControlFileType::Read => (0o444, Some(BufferType::Read)),
                     ControlFileType::Write => (0o222, Some(BufferType::Write)),
-                    ControlFileType::ReadWrite => (0o666, None), // Will set on first operation
+                    ControlFileType::ReadWrite => (0o666, None),
                 };
                 (0, perms, buf_type)
             }

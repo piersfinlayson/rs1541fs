@@ -3,6 +3,7 @@ mod bg;
 mod daemon;
 mod drivemgr;
 mod file;
+mod fusermount;
 mod ipc;
 mod mount;
 mod mountsvc;

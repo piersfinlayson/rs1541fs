@@ -8,6 +8,7 @@ use crate::mount::Mount;
 
 use fs1541::error::{Error, Fs1541Error};
 
+use flume::{Receiver, Sender};
 use log::{debug, error, info, trace, warn};
 use nix::unistd::Pid;
 use std::collections::HashMap;
@@ -16,7 +17,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Runtime;
-use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{sleep, timeout};
@@ -89,8 +89,8 @@ impl Daemon {
     pub fn new(pid: Pid, cbm: Arc<Mutex<Cbm>>) -> Result<Self, Error> {
         // Create channels - to send to the BackgroundProcess and for IpcServer
         // to receive back from it
-        let (bg_proc_tx, bg_proc_rx) = mpsc::channel(MAX_BG_CHANNELS);
-        let (bg_rsp_tx, bg_rsp_rx) = mpsc::channel(MAX_BG_RSP_CHANNELS);
+        let (bg_proc_tx, bg_proc_rx) = flume::bounded(MAX_BG_CHANNELS);
+        let (bg_rsp_tx, bg_rsp_rx) = flume::bounded(MAX_BG_RSP_CHANNELS);
         let bg_proc_shutdown = Arc::new(AtomicBool::new(false));
 
         // Create mountpoints HashMap
@@ -200,11 +200,20 @@ impl Daemon {
         // Get a clone of bg_proc to pass into the thread
         let bg_proc = self.bg_proc.clone().unwrap();
         let bg_proc_handle = tokio::spawn(async move {
+            let mut bg_proc = bg_proc.lock().await;
+            // Create a new scope to ensure the lock is released
+            {
+                bg_proc.run().await;
+            }
+        });
+        /*
+        let bg_proc_handle = tokio::spawn(async move {
             locking_section!("Lock", "BG Processor", {
                 let mut bg_proc = bg_proc.lock().await;
                 bg_proc.run().await;
             });
         });
+        */
         self.bg_proc_abort = Some(bg_proc_handle.abort_handle());
         self.bg_proc_handle = Some(bg_proc_handle);
     }

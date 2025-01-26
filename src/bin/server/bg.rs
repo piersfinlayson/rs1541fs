@@ -5,8 +5,9 @@ use crate::mountsvc::MountService;
 use fs1541::error::{Error, Fs1541Error};
 /// Background processing - provides a single worker thread which handles IPC
 /// and background tasks on behalf of Mounts
-use rs1541::{Cbm, CbmDeviceInfo, CbmDriveUnit, CbmStatus};
+use rs1541::{Cbm, CbmDeviceInfo, CbmDirListing, CbmDriveUnit, CbmStatus};
 
+use flume::{Receiver, Sender};
 use log::{debug, error, info, trace, warn};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -15,7 +16,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::net::unix::OwnedWriteHalf;
-use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, RwLock};
 
 // Max number of BackgroundProcess channels which willbe opened
@@ -43,25 +43,32 @@ pub enum OpType {
     },
 
     /// FUSE operations that need background processing
-    ReadDirectory,
+    ReadDirectory {
+        drive_unit: Arc<RwLock<CbmDriveUnit>>,
+    },
     ReadFile {
+        device: u8,
+        drive_unit: u8,
         path: PathBuf,
         // Optional offset/length if we want to read only part of the file
         offset: Option<u64>,
         length: Option<u64>,
     },
     WriteFile {
+        device: u8,
+        drive_unit: u8,
         path: PathBuf,
         data: Vec<u8>,
     },
 
     /// Drive-specific operations
     InitDrive {
-        drive: CbmDriveUnit,
+        device: u8,
+        drive_unit: u8,
     },
     ValidateDrive {
         // Verify drive is responding correctly
-        drive: CbmDriveUnit,
+        device: u8,
     },
     Identify {
         device: u8,
@@ -87,7 +94,7 @@ impl std::fmt::Display for OpType {
             OpType::BusReset => write!(f, "BusReset"),
             OpType::Mount { .. } => write!(f, "Mount"),
             OpType::Unmount { .. } => write!(f, "Unmount"),
-            OpType::ReadDirectory => write!(f, "ReadDirectory"),
+            OpType::ReadDirectory { .. } => write!(f, "ReadDirectory"),
             OpType::ReadFile { .. } => write!(f, "ReadFile"),
             OpType::WriteFile { .. } => write!(f, "WriteFile"),
             OpType::InitDrive { .. } => write!(f, "InitDrive"),
@@ -103,31 +110,37 @@ impl std::fmt::Display for OpType {
 
 #[allow(dead_code)]
 impl OpType {
+    pub fn priority(&self) -> Priority {
+        match self {
+            // Critical operations
+            Self::BusReset => Priority::Critical,
+
+            // Mounting and unmounting are high priority
+            Self::Mount { .. } | Self::Unmount { .. } => Priority::High,
+
+            // File operations are normal priority
+            Self::ReadFile { .. } | Self::WriteFile { .. } => Priority::Normal,
+
+            // Directory operations are normal priority
+            Self::ReadDirectory { .. } => Priority::Normal,
+
+            // Drive operations are normal priority
+            Self::InitDrive { .. } | Self::ValidateDrive { .. } => Priority::Normal,
+
+            // Status operations are normal priority
+            Self::Identify { .. } | Self::GetStatus { .. } => Priority::Normal,
+
+            // Cache operations are low priority
+            Self::UpdateDirectoryCache | Self::ReadCacheFile { .. } => Priority::Low,
+
+            // Cache invalidation is low priority
+            Self::InvalidateCache { .. } => Priority::Low,
+        }
+    }
+
     /// Get the recommended timeout for this operation type
     pub fn timeout(&self) -> Duration {
-        match self {
-            // Critical operations get shorter timeouts
-            Self::BusReset => Duration::from_secs(30),
-            Self::Mount { .. } | Self::Unmount { .. } => Duration::from_secs(60),
-
-            // File operations get longer timeouts due to slow drive speeds
-            Self::ReadFile { .. } | Self::WriteFile { .. } => Duration::from_secs(300),
-
-            // Directory operations are typically faster
-            Self::ReadDirectory => Duration::from_secs(120),
-
-            // Background operations can take longer
-            Self::UpdateDirectoryCache | Self::ReadCacheFile { .. } => Duration::from_secs(600),
-
-            // Status operations should be quick
-            Self::ValidateDrive { .. }
-            | Self::Identify { .. }
-            | Self::GetStatus { .. }
-            | Self::InitDrive { .. } => Duration::from_secs(30),
-
-            // Cache invalidation is purely in-memory
-            Self::InvalidateCache { .. } => Duration::from_secs(5),
-        }
+        self.priority().timeout()
     }
 
     /// Whether this operation can be cancelled if a higher priority operation comes in
@@ -161,7 +174,7 @@ impl OpType {
 #[derive(Debug)]
 pub struct OpResponse {
     pub rsp: Result<OpResponseType, Error>,
-    pub stream: Option<OwnedWriteHalf>,
+    stream: Option<OwnedWriteHalf>,
 }
 
 impl std::fmt::Display for OpResponse {
@@ -175,8 +188,12 @@ impl std::fmt::Display for OpResponse {
 
                     OpResponseType::Unmount() => write!(f, "Unmount"),
 
-                    OpResponseType::ReadDirectory { status } => {
-                        write!(f, "Read Directory - {} entries", status.len())
+                    OpResponseType::ReadDirectory { listings } => {
+                        writeln!(f, "Read Directory")?;
+                        for (drive_num, listing) in listings.iter().enumerate() {
+                            writeln!(f, "Drive {}: {} files", drive_num, listing.num_files())?
+                        }
+                        Ok(())
                     }
 
                     OpResponseType::ReadFile {
@@ -248,7 +265,7 @@ pub enum OpResponseType {
     Mount(),
     Unmount(),
     ReadDirectory {
-        status: Vec<CbmStatus>,
+        listings: Vec<CbmDirListing>,
     },
     ReadFile {
         status: CbmStatus,
@@ -292,7 +309,9 @@ impl From<OpType> for OpResponseType {
 
             OpType::Unmount { .. } => OpResponseType::Unmount(),
 
-            OpType::ReadDirectory => OpResponseType::ReadDirectory { status: Vec::new() },
+            OpType::ReadDirectory { .. } => OpResponseType::ReadDirectory {
+                listings: Vec::new(),
+            },
 
             OpType::ReadFile { .. } => OpResponseType::ReadFile {
                 status: CbmStatus::default(),
@@ -368,18 +387,17 @@ impl std::fmt::Display for Priority {
     }
 }
 
-/// A background operation to be processed
-/// sender is the mpsc:Sender to use to send the OpResponse/Error back to the
-/// originator
-/// stream is a UnixStream OwnedWriteHalf to pass back to the originator (f
-/// provided) so they can send the data out of the socket
+/// A background operation to be processed sender is the flumempsc:Sender to
+/// use to send the OpResponse/Error back to the originator stream is a
+/// UnixStream OwnedWriteHalf to pass back to the originator (provided) so the
+/// can send the data out of the socket
 #[derive(Debug)]
 pub struct Operation {
     priority: Priority,
     op_type: OpType,
     created_at: Instant,
     sender: Arc<Sender<OpResponse>>,
-    pub stream: Option<OwnedWriteHalf>,
+    stream: Option<OwnedWriteHalf>,
 }
 
 // Note that the Sender only needs to be an Arc, because Sender implements
@@ -387,13 +405,12 @@ pub struct Operation {
 // it to BackgroundProcess repeatedly
 impl Operation {
     pub fn new(
-        priority: Priority,
         op_type: OpType,
         sender: Arc<Sender<OpResponse>>,
         stream: Option<OwnedWriteHalf>,
     ) -> Self {
         Self {
-            priority,
+            priority: op_type.priority(),
             op_type,
             created_at: Instant::now(),
             sender,
@@ -403,6 +420,17 @@ impl Operation {
 
     pub fn priority_timeout(&self) -> Duration {
         self.priority.timeout()
+    }
+
+    pub fn set_stream(&mut self, stream: OwnedWriteHalf) -> Result<(), Error> {
+        if self.stream.is_some() {
+            return Err(Error::Fs1541 {
+                message: "Couldn't handle request from client".into(),
+                error: Fs1541Error::Internal("Operation stream already set".into()),
+            });
+        }
+        self.stream = Some(stream);
+        Ok(())
     }
 }
 
@@ -425,6 +453,13 @@ impl OpResponse {
             rsp: Err(error),
             stream,
         }
+    }
+
+    pub fn take_stream(&mut self) -> Result<OwnedWriteHalf, Error> {
+        self.stream.take().ok_or_else(|| Error::Fs1541 {
+            message: "Couldn't resond to request from client".into(),
+            error: Fs1541Error::Internal("No stream on OpResponse".into()),
+        })
     }
 }
 
@@ -497,7 +532,7 @@ impl OperationQueues {
 
                 // Send the response - if send fails it returns back the whole
                 // rsp - but we'll just drop it
-                let _ = op.sender.send(rsp).await.inspect_err(|e| {
+                let _ = op.sender.send_async(rsp).await.inspect_err(|e| {
                     warn!("Hit error reporting timed out operation {} - dropping", e)
                 });
             }
@@ -612,6 +647,25 @@ impl Proc {
                 })
             }
 
+            OpType::ReadDirectory { drive_unit } => {
+                locking_section!("Lock", "Cbm", {
+                    let mut cbm = self.cbm.lock().await;
+                    locking_section!("Read", "Drive Unit", {
+                        let drive_unit = drive_unit.read().await;
+                        drive_unit
+                            .dir(&mut cbm)
+                            .map(|l| OpResponseType::ReadDirectory { listings: l })
+                            .map_err(|e| Error::Rs1541 {
+                                message: format!(
+                                    "Failed to read directory for device {}",
+                                    drive_unit.device_number
+                                ),
+                                error: e,
+                            })
+                    })
+                })
+            }
+
             _ => Err(Error::Fs1541 {
                 message: format!("Operation not yet supported {}", op_type),
                 error: Fs1541Error::Operation(format!("Operation not supported: {}", op_type)),
@@ -625,7 +679,7 @@ impl Proc {
         rsp: OpResponse,
     ) -> Result<(), Error> {
         debug!("Attempting to send response from background processor");
-        let send_result = sender.send(rsp).await;
+        let send_result = sender.send_async(rsp).await;
         match &send_result {
             Ok(_) => debug!("Successfully sent response through channel"),
             Err(e) => error!("Failed to send through channel: {:?}", e),

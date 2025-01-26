@@ -3,17 +3,23 @@ use fs1541::error::{Error, Fs1541Error};
 /// client requests.  Any requests which need to be handled asyncronously are
 /// sent to BackgroundProcess for handling.
 ///
-/// This object gets given a mpsc Sender in order to send to BackgroundProcess,
-/// and receives another mpsc Receiver which is used to receive replies from
-/// BackgroundProcess, so they can be returned to the client (assuming it
-/// hasn't timed out and dropped the connection to the server).
+/// This object gets given a flume Sender in order to send to
+/// BackgroundProcess, and receives another flume Receiver which is used to
+/// receive replies from BackgroundProcess, so they can be returned to the
+/// client (assuming it hasn't timed out and dropped the connection to the
+/// server).
+///
+/// We use flume for our mpsc channels, instead of tokio::sync::mpsc, as it
+/// supports sync and async contexts - we need a sync context in order to
+/// use from within fuser threads.
 use fs1541::ipc::Request::{self, BusReset, Die, GetStatus, Identify, Mount, Ping, Unmount};
 use fs1541::ipc::{Response, SOCKET_PATH};
 
-use crate::bg::{OpResponse, OpResponseType, OpType, Operation, Priority};
+use crate::bg::{OpResponse, OpResponseType, OpType, Operation};
 use crate::mount::{validate_mount_request, validate_unmount_request};
 
 use either::{Left, Right};
+use flume::{Receiver, Sender};
 use log::{debug, error, info, trace, warn};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
@@ -25,7 +31,6 @@ use tokio::io::BufReader;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
@@ -167,21 +172,11 @@ impl IpcServer {
                     _ => unreachable!(),
                 };
 
-                // Set the priority
-                let priority = match request.clone() {
-                    Mount { .. } => Priority::High,
-                    Unmount { .. } => Priority::High,
-                    BusReset { .. } => Priority::Critical,
-                    Identify { .. } => Priority::Low,
-                    GetStatus { .. } => Priority::Low,
-                    _ => unreachable!(),
-                };
-
                 // Create Operation itself
                 // Set stream to None here, as if we fill in writer it will
                 // have moved and we won't be able to use it locally in the
                 // Right case
-                let op = Operation::new(priority, op_type, self.bg_rsp_tx.clone(), None);
+                let op = Operation::new(op_type, self.bg_rsp_tx.clone(), None);
                 Left(op)
             }
             Ping => Right(Response::Pong),
@@ -207,7 +202,7 @@ impl IpcServer {
         // - Right - send the response
         match either {
             Left(mut op) => {
-                op.stream = Some(writer);
+                op.set_stream(writer)?;
                 self.bg_proc_tx.try_send(op).map_err(|e| Error::Fs1541 {
                     message: "Failed to send message to background processor".to_string(),
                     error: Fs1541Error::Internal(e.to_string()),
@@ -336,10 +331,10 @@ impl IpcServer {
         bg_rsp_rx: Receiver<OpResponse>,
     ) -> Result<JoinHandle<()>, Error> {
         trace!("Entered start_background_receiver");
-        let mut rx = bg_rsp_rx;
+        let rx = bg_rsp_rx;
 
         info!(
-            "Starting bg receiver with channel capacity: {}",
+            "Starting bg receiver with channel capacity: {:?}",
             rx.capacity()
         );
 
@@ -356,12 +351,12 @@ impl IpcServer {
                             break;
                         }
                     }
-                    recv_rsp = rx.recv() => {
+                    recv_result = rx.recv_async() => {
                         trace!("Background response processor recv returned");
-                        match recv_rsp {
-                            Some(mut resp) => {
+                        match recv_result {
+                            Ok(mut resp) => {
                                 debug!("Received response from background processor {:?}", resp);
-                                if let Some(mut stream) = resp.stream.take() {
+                                if let Ok(mut stream) = resp.take_stream() {
                                     let cli_resp = Response::from(OpResponseWrapper(Ok(resp)));
                                     if let Err(e) = Self::send_response(&mut stream, cli_resp).await {
                                         warn!("Failed to send response back to client {}", e);
@@ -372,8 +367,8 @@ impl IpcServer {
                                     warn!("No stream on response - cannot send response to the client");
                                 }
                             }
-                            None => {
-                                warn!("Channel closed, exiting bg receiver");
+                            Err(e) => {
+                                warn!("Channel closed, exiting bg receiver: {}", e);
                                 break;
                             }
                         }
