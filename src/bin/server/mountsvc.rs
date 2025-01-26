@@ -235,8 +235,6 @@ impl MountService {
         // Next step is to remove the drive. We do this first in case the
         // drive is busy and can't be removed - we don't want to have already
         // removed from mountpaths
-        // TODO Strictly as the drive is added by mount.mount() we should probably
-        // remove it in mount.unmoun()
         locking_section!("Lock", "Drive Manager", {
             let drive_mgr = self.drive_mgr.lock().await;
             if let Err(e) = drive_mgr.remove_drive(device_number).await {

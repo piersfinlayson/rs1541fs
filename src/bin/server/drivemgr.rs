@@ -279,6 +279,7 @@ impl DriveManager {
         });
 
         for device_number in drive_numbers {
+            warn!("Cleaning up drive {device_number} as MountSvc failed to clean it up");
             match self.remove_drive(device_number).await {
                 Ok(_) => info!("Successfully cleaned up drive {}", device_number),
                 Err(Error::Fs1541 {
