@@ -147,6 +147,14 @@ async fn async_main(args: &Args) -> Result<(), Error> {
         info!("Daemonized at pid {}", pid);
     }
 
+    debug!("Args:");
+    debug!("  foreground: {}", args.foreground);
+    debug!("  std_logging: {}", args.std_logging);
+    debug!("  autounmount: {}", args.autounmount);
+    debug!("  dir_cache_expiry_secs: {}", args.dir_cache_expiry_secs);
+    debug!("  dir_reread_timeout_secs: {}", args.dir_reread_timeout_secs);
+    debug!("  dir_read_sleep_ms: {}", args.dir_read_sleep_ms);
+
     // Use rs1541 and open the XUM1541 device - we do this early on
     // because there's no poin continuing if we don't have an XUM1541
     let cbm = Cbm::new().map_err(|e| Error::Rs1541 {

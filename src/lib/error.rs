@@ -72,6 +72,14 @@ pub enum Fs1541Error {
     /// Is a directory
     #[error("Is a directory: {0}")]
     IsDir(String),
+
+    /// Isn't a directory
+    #[error("File is not a directory: {0}")]
+    IsNotDir(String),
+
+    /// No entry (e.g. file or directory)
+    #[error("No (filesystem) entry: {0}")]
+    NoEntry(String),
 }
 
 impl Fs1541Error {
@@ -88,6 +96,8 @@ impl Fs1541Error {
             Fs1541Error::ReadOrWriteOnly(_) => libc::EINVAL,
             Fs1541Error::FileAccess(_) => libc::EACCES,
             Fs1541Error::IsDir(_) => libc::EISDIR,
+            Fs1541Error::IsNotDir(_) => libc::ENOTDIR,
+            Fs1541Error::NoEntry(_) => libc::ENOENT,
         }
     }
 }

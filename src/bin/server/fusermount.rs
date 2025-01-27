@@ -1,7 +1,10 @@
 use crate::file::{FileEntry, FileEntryType, XattrOps};
 use crate::locking_section;
 use crate::mount::Mount;
+use crate::{Error, Fs1541Error};
+use crate::args::get_args;
 
+use either::Either::{self, Right};
 use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyDirectory, ReplyEntry, ReplyXattr, Request,
     FUSE_ROOT_ID,
@@ -10,7 +13,8 @@ use fuser::{
 use log::{debug, error, info, trace, warn};
 use std::ffi::OsStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::thread::sleep;
+use std::time::{Duration, SystemTime};
 
 pub struct FuserMount {
     mount: Arc<parking_lot::RwLock<Mount>>,
@@ -127,47 +131,112 @@ impl Filesystem for FuserMount {
             entries.push((FUSE_ROOT_ID, FileType::Directory, "."));
         }
 
-        let files = locking_section!("Read", "Mount", {
-            let mount = self.mount.read();
-            let disk_info = mount.disk_info();
+        // First of all, decide whether we want to provide a directory
+        // listing of the files on a disk, or, if we have 2 drives,
+        // the two directories (one for each drive)
 
-            if ino != FUSE_ROOT_ID {
-                // Handle non-root directory
-                match mount.file_by_inode(ino) {
-                    Some(file_entry) => {
-                        match file_entry.native {
-                            FileEntryType::Directory(drive_num) => {
-                                // Clone the files to own them outside the lock
-                                disk_info[drive_num as usize].files().to_vec()
+        // Left is file_entries, right is the drive  we want to read
+        let either = locking_section!("Read", "Mount", {
+            let mount = self.mount.read();
+
+            if mount.num_drives() > 1 && ino == FUSE_ROOT_ID {
+                // We have multiple drives, and we're looking at the root
+                // so we should return the sub-directories.  Just do
+                // that now
+
+                // Create owned vector of directory entries
+                // The filter_map removes any None respones and converts
+                // Some(value_ to value
+                Either::Left(
+                    (0..mount.num_drives())
+                        .filter_map(|ii| mount.get_drive_dir(ii))
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                // Either we have a single drive, or we want to read
+                // a sub-directory.  Figure out which.
+                //
+                // If the inode is for a non-directory we'll reject it
+                // here
+                if mount.num_drives() != 1 {
+                    match mount.get_drive_num_by_inode(ino) {
+                        Some(drive_num) => Right(drive_num),
+                        None => {
+                            trace!("No matching drive for inode {}", ino);
+
+                            // Strictly we could figure out if there is
+                            // a file
+                            if mount.file_by_inode(ino).is_none() {
+                                reply.error(libc::ENOENT);
+                            } else {
+                                reply.error(libc::ENOTDIR)
                             }
-                            _ => {
-                                warn!("Tried to readdir a file {}", file_entry.fuse.name);
-                                reply.error(libc::ENOTDIR);
-                                return;
-                            }
+                            return;
                         }
                     }
-                    None => {
-                        warn!("Tried to readdir a non-existent inode {}", ino);
-                        reply.error(libc::ENOENT);
-                        return;
-                    }
-                }
-            } else {
-                // Handle root directory
-                if mount.num_drives() > 1 {
-                    // Create owned vector of directory entries
-                    disk_info
-                        .iter()
-                        .filter_map(|disk| disk.disk_dir.as_ref())
-                        .cloned()
-                        .collect::<Vec<_>>()
                 } else {
-                    disk_info[0].files().to_vec()
+                    Right(0)
                 }
             }
         });
 
+        // Now, if we need to list files,  we need to decide whether to re-
+        // read the disk or not
+
+        // Left is still files.  Right is now whether to re-read and which drive_num
+        let files = match either {
+            Either::Left(files) => {
+                // We already have the files
+                files
+            }
+            Either::Right(drive_num) => {
+                // Now figure out whether to read the directory cache or
+                // re-read from disk
+                let re_read = locking_section!("Read", "Mount", {
+                    let mount = self.mount.read();
+
+                    mount.should_refresh_dir(drive_num)
+                });
+
+                // Re-read the disk if we need to
+                if re_read {
+                    // Kick off directory re-read
+                    let rsp = locking_section!("Write", "Mount", {
+                        let mut mount = self.mount.write();
+                        mount.do_dir_sync(drive_num)
+                    });
+
+                    if let Err(e) = rsp {
+                        warn!("Directory re-read attampted failed, but we're going to continue anyway: {e}");
+                    } else {
+                        match self.wait_for_dir(drive_num) {
+                            Ok(_) => (),
+                            Err(e) => match e {
+                                Error::Fs1541 {
+                                    message: _,
+                                    error: e,
+                                } => {
+                                    reply.error(e.to_fuse_reply_error());
+                                    return;
+                                }
+                                _ => {
+                                    reply.error(libc::EIO);
+                                    return;
+                                }
+                            },
+                        }
+                    };
+                }
+
+                // Now get the files
+                locking_section!("Read", "Mount", {
+                    let mount = self.mount.write();
+                    mount.get_drive_files(drive_num)
+                })
+            }
+        };
+
+        // Now we have the files, we can list them
         for (ii, file) in files.into_iter().enumerate().skip(offset as usize) {
             if reply.add(
                 file.inode(),
@@ -414,4 +483,71 @@ impl Filesystem for FuserMount {
 
     }
     */
+}
+
+impl FuserMount {
+    fn wait_for_dir(&mut self, drive_num: u8) -> Result<(), Error> {
+        let args = get_args();
+        let dir_reread_timeout_ms = Duration::from_secs(args.dir_reread_timeout_secs);
+        let sleep_between_checks: Duration = Duration::from_millis(args.dir_read_sleep_ms);
+        let max_count: u64 = args.dir_reread_timeout_secs * 1000 / args.dir_read_sleep_ms;
+        let age_out: Duration = Duration::from_secs(args.dir_cache_expiry_secs);
+        trace!(
+            "Dir re-read timeout: {}s, sleep between checks: {}ms, max count: {}, age out: {}s",
+            dir_reread_timeout_ms.as_secs(),
+            sleep_between_checks.as_millis(),
+            max_count,
+            age_out.as_secs()
+        );
+
+        let result = {
+            let mut count = 0;
+            loop {
+                // Only go around the loop a certain number of times
+                if count >= max_count {
+                    warn!("Couldn't re-read directory listing in 10s");
+                    break Err(Error::Fs1541 {
+                        message: "Directory re-read timed out".into(),
+                        error: Fs1541Error::Timeout("".into(), dir_reread_timeout_ms),
+                    });
+                }
+
+                // Check whether dir listing is fresh
+
+                // Enter locking section
+                let disk_is_fresh = locking_section!("Read", "Mount", {
+                    let mount = self.mount.read();
+
+                    if let Some(read_time) = mount.disk_info()[drive_num as usize].disk_read_time {
+                        match SystemTime::now().duration_since(read_time) {
+                            Ok(duration) if duration < age_out => true,
+                            Ok(_) => false,
+                            Err(_) => {
+                                if count == 0 {
+                                    // Only warn the first time
+                                    warn!("Failed to calculate how long since last checked disk");
+                                }
+                                false
+                            }
+                        }
+                    } else {
+                        // It's been forever since we read the disk
+                        false
+                    }
+                });
+                // Exit locking section
+
+                // Break out of the loop
+                if disk_is_fresh {
+                    break Ok(());
+                }
+
+                // Increase the count, sleep, and around we go again
+                count += 1;
+                sleep(sleep_between_checks);
+            }
+        };
+
+        result
+    }
 }

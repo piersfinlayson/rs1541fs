@@ -113,6 +113,7 @@ pub enum DiskXattr {
     BlocksFree(u16),
     BlocksUsed(u16),
     TotalBlocks(u16),
+    LastDirRead(SystemTime),
 }
 
 #[derive(Debug, Clone)]
@@ -233,6 +234,7 @@ impl Xattr for DiskXattr {
             DiskXattr::BlocksFree(_) => "user.disk.cbm_blocks.free",
             DiskXattr::BlocksUsed(_) => "user.disk.cbm_blocks.used",
             DiskXattr::TotalBlocks(_) => "user.disk.cbm_blocks.total",
+            DiskXattr::LastDirRead(_) => "user.disk.last_dir_read",
         }
     }
 
@@ -243,6 +245,10 @@ impl Xattr for DiskXattr {
             DiskXattr::BlocksFree(blocks)
             | DiskXattr::BlocksUsed(blocks)
             | DiskXattr::TotalBlocks(blocks) => blocks.to_string(),
+            DiskXattr::LastDirRead(time) => {
+                let local_time: DateTime<Local> = (*time).into();
+                local_time.format("%a %b %d %H:%M:%S %Z %Y").to_string()
+            }
         }
     }
 }
@@ -339,6 +345,7 @@ impl DiskXattr {
             DiskXattr::BlocksFree(listing.blocks_free),
             DiskXattr::BlocksUsed(listing.num_blocks_used_valid()),
             DiskXattr::TotalBlocks(listing.total_blocks()),
+            DiskXattr::LastDirRead(SystemTime::now()),
         ]
     }
 }
@@ -422,6 +429,8 @@ pub struct DiskInfo {
 
     /// Extended attributes for this disk
     pub xattrs: Vec<DiskXattr>,
+
+    pub disk_read_time: Option<SystemTime>,
 }
 
 impl DiskInfo {
@@ -435,6 +444,7 @@ impl DiskInfo {
             control_files: Self::control_files(),
             cbm_files: Vec::new(),
             xattrs: Vec::new(),
+            disk_read_time: None,
         }
     }
 
@@ -449,6 +459,7 @@ impl DiskInfo {
         self.blocks_free = Some(listing.blocks_free);
         self.cbm_files = Self::cbm_files_from_dir_listing(listing);
         self.xattrs = DiskXattr::from_dir_listing(listing);
+        self.disk_read_time = Some(SystemTime::now());
     }
 
     fn cbm_files_from_dir_listing(listing: &CbmDirListing) -> Vec<FileEntry> {
@@ -624,7 +635,8 @@ impl ControlFile {
         }
 
         match self.purpose {
-            ControlFilePurpose::ExecDirRefresh => mount.do_dir_sync().map(|_| data.len() as u32),
+            // TODO - fix drive_num in ExecDirRefresh
+            ControlFilePurpose::ExecDirRefresh => mount.do_dir_sync(0).map(|_| data.len() as u32),
             ControlFilePurpose::ExecDriveCommand => Err(Error::Fs1541 {
                 message: "Not implemented".to_string(),
                 error: Fs1541Error::Internal("ExecDriveCommand not implemented".to_string()),

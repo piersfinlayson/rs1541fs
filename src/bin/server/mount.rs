@@ -20,7 +20,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use tokio::sync::{Mutex, RwLock};
 
 const NUM_MOUNT_RX_CHANNELS: usize = 2;
@@ -129,15 +129,6 @@ impl Mount {
 
         Ok(mount)
     }
-
-    /*
-    pub fn _refresh_directory(&mut self) -> Result<(), Error> {
-        let mut guard = self.directory_cache.write();
-        guard.entries.clear();
-        guard._last_updated = std::time::SystemTime::now();
-        Ok(())
-    }
-    */
 
     #[allow(dead_code)]
     fn allocate_inode(&mut self) -> u64 {
@@ -466,7 +457,7 @@ impl Mount {
         }
     }
 
-    pub fn do_dir_sync(&mut self) -> Result<(), Error> {
+    pub fn do_dir_sync(&mut self, _drive_num: u8) -> Result<(), Error> {
         if !self.dir_outstanding {
             // Send a request off to the BG processor to read the directory (and
             // reply back to us when done)
@@ -495,7 +486,7 @@ impl Mount {
                 }
             }
         } else {
-            debug!("No sending dir request, as we have one oustanding");
+            debug!("Not sending dir request, as we have one oustanding");
             Ok(())
         }
     }
@@ -513,6 +504,10 @@ impl Mount {
             self.shared_self = Some(shared_self);
             Ok(())
         }
+    }
+
+    pub fn set_dir_outstanding(&mut self, outstanding: bool) {
+        self.dir_outstanding = outstanding;
     }
 
     pub fn create_bg_response_thread(&mut self) -> Result<(), Error> {
@@ -681,6 +676,34 @@ impl Mount {
                 FileEntryType::Directory(drive_num) => Some(drive_num),
                 _ => None,
             })
+    }
+
+    pub fn should_refresh_dir(&self, drive_num: u8) -> bool {
+        if drive_num >= self.num_drives() {
+            warn!(
+                "Drive number out of range {} vs {}",
+                drive_num,
+                self.num_drives()
+            );
+            return false;
+        }
+
+        if self.disk_info[drive_num as usize].disk_read_time.is_none() {
+            true
+        } else {
+            // if it's been more than DIR_CACHE_EXPIRY_SECS, or we have never
+            // read the disk, re-read
+            let now = SystemTime::now();
+            let refresh_duration = Duration::from_secs(get_args().dir_cache_expiry_secs);
+            match now.duration_since(
+                self.disk_info[drive_num as usize]
+                    .disk_read_time
+                    .unwrap_or(now),
+            ) {
+                Ok(duration) => duration >= refresh_duration,
+                Err(_) => true,
+            }
+        }
     }
 }
 
