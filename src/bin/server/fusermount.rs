@@ -1,8 +1,8 @@
+use crate::args::get_args;
 use crate::file::{FileEntry, FileEntryType, XattrOps};
 use crate::locking_section;
 use crate::mount::Mount;
 use crate::{Error, Fs1541Error};
-use crate::args::get_args;
 
 use either::Either::{self, Right};
 use fuser::{
