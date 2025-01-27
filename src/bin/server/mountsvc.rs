@@ -63,33 +63,39 @@ impl MountService {
         )?;
 
         // Now mount it - if fails we have to remove it from the DriveManager
-        let mount_options = match mount.mount().await {
-            Ok(mount) => mount,
-            Err(e) => {
-                warn!("Mount failed after drive was added - removing");
-                locking_section!("Lock", "Drive Manager", {
-                    let drive_mgr = self.drive_mgr.lock().await;
-                    if let Err(_remove_err) = drive_mgr.remove_drive(device_number).await {
-                        warn!("Failed to cleanup failed mount: {}", e);
-                    }
-                    return Err(e);
-                });
-            }
+        let fuser_mount_options = if let Err(e) = mount.mount().await {
+            debug!("Mount failed after drive was added - removing");
+            locking_section!("Lock", "Drive Manager", {
+                let drive_mgr = self.drive_mgr.lock().await;
+                if let Err(_remove_err) = drive_mgr.remove_drive(device_number).await {
+                    warn!("Failed to cleanup failed mount: {}", e);
+                }
+                return Err(e);
+            });
+        } else {
+            mount.fuser_mount_options()
         };
 
-        // Now create an Arc<RwLock<Mount>>
+        // Now create an Arc<RwLock<Mount>>, so we can create FuserMount with
+        // it.  This allows FuserMount (which implements the fuser FileSystem
+        // and handles fuser callbacks) to access the Mount object.
         let shared_mount = Arc::new(parking_lot::RwLock::new(mount));
 
-        // Now create the FuserMount object to pass to fuser
+        // Now create FuserMount
         let fuser_mount = FuserMount::new(shared_mount.clone());
-        let fuser = fuser::spawn_mount2(fuser_mount, &mountpoint, &mount_options).map_err(|e| {
-            Error::Io {
-                message: "Failed to spawn FUSE mount".to_string(),
-                error: e.to_string(),
-            }
-        })?;
 
-        // Add fuser thread to mount object
+        // Now create fuser - this mounts the filesystem
+        let fuser =
+            fuser::spawn_mount2(fuser_mount, &mountpoint, &fuser_mount_options).map_err(|e| {
+                Error::Io {
+                    message: "Failed to spawn FUSE mount".to_string(),
+                    error: e.to_string(),
+                }
+            })?;
+
+        // Add fuser thread to mount object, and set up mount's BG processing
+        // response thread, to handle responses for operatons it sends to the
+        // BG processor
         locking_section!("Write", "Mount", {
             let mut mount = shared_mount.write();
             mount.update_fuser(fuser);
@@ -97,10 +103,40 @@ impl MountService {
             mount.create_bg_response_thread()?;
         });
 
+        // Finally, add it to the mountpoints HashMap
+        if let Err(e) = self
+            .add_mount_to_mountpoints(shared_mount.clone(), mountpoint, device_number)
+            .await
+        {
+            // Failed to add the mount to mountpoints.  Unwind.
+            // No need to do anything to fuser - it will get dropped
+            // automatically
+            locking_section!("Write", "Mount", {
+                let mut mount = shared_mount.write();
+                mount.unmount();
+            });
+            locking_section!("Lock", "Drive Manager", {
+                let drive_mgr = self.drive_mgr.lock().await;
+                if let Err(_remove_err) = drive_mgr.remove_drive(device_number).await {
+                    warn!("Failed to cleanup failed mount: {}", e);
+                }
+            });
+            Err(e)
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn add_mount_to_mountpoints<P: AsRef<Path>>(
+        &self,
+        mount: Arc<parking_lot::RwLock<Mount>>,
+        mountpoint: P,
+        device_number: u8,
+    ) -> Result<(), Error> {
         // Now it's mounted, add it to the mountpoints HashMap
         locking_section!("Lock", "Mountpoints", {
             let mut mps = self.mountpoints.write().await;
-            match mps.insert(mountpoint.as_ref().to_path_buf(), shared_mount) {
+            match mps.insert(mountpoint.as_ref().to_path_buf(), mount) {
                 None => Ok(()), // No previous value, success
                 Some(_) => {
                     warn!(

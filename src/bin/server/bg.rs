@@ -188,7 +188,10 @@ impl std::fmt::Display for OpResponse {
 
                     OpResponseType::Unmount() => write!(f, "Unmount"),
 
-                    OpResponseType::ReadDirectory { listings } => {
+                    OpResponseType::ReadDirectory {
+                        status: _,
+                        listings,
+                    } => {
                         writeln!(f, "Read Directory")?;
                         for (drive_num, listing) in listings.iter().enumerate() {
                             writeln!(f, "Drive {}: {} files", drive_num, listing.num_files())?
@@ -265,6 +268,7 @@ pub enum OpResponseType {
     Mount(),
     Unmount(),
     ReadDirectory {
+        status: CbmStatus,
         listings: Vec<CbmDirListing>,
     },
     ReadFile {
@@ -310,6 +314,7 @@ impl From<OpType> for OpResponseType {
             OpType::Unmount { .. } => OpResponseType::Unmount(),
 
             OpType::ReadDirectory { .. } => OpResponseType::ReadDirectory {
+                status: CbmStatus::default(),
                 listings: Vec::new(),
             },
 
@@ -654,7 +659,10 @@ impl Proc {
                         let drive_unit = drive_unit.read().await;
                         drive_unit
                             .dir(&mut cbm)
-                            .map(|l| OpResponseType::ReadDirectory { listings: l })
+                            .map(|(l, s)| OpResponseType::ReadDirectory {
+                                status: s,
+                                listings: l,
+                            })
                             .map_err(|e| Error::Rs1541 {
                                 message: format!(
                                     "Failed to read directory for device {}",

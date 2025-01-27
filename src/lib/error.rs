@@ -52,4 +52,42 @@ pub enum Fs1541Error {
     /// Timeout error
     #[error("Timeout error: {0} Timer duration: {1:?}")]
     Timeout(String, std::time::Duration),
+
+    /// Read only error
+    #[error("File {0} is read only")]
+    ReadOnly(String),
+
+    /// Write only error
+    #[error("Write {0} is read only")]
+    WriteOnly(String),
+
+    /// Read and Write not supported
+    #[error("Read _or_ write only supported {0}")]
+    ReadOrWriteOnly(String),
+
+    /// General file access error
+    #[error("General file access error: {0}")]
+    FileAccess(String),
+
+    /// Is a directory
+    #[error("Is a directory: {0}")]
+    IsDir(String),
+}
+
+impl Fs1541Error {
+    pub fn to_fuse_reply_error(&self) -> i32 {
+        match self {
+            Fs1541Error::Operation(_) => libc::EIO,
+            Fs1541Error::Configuration(_) => libc::EINVAL,
+            Fs1541Error::Validation(_) => libc::EINVAL,
+            Fs1541Error::AgedOut(_) => libc::ETIMEDOUT,
+            Fs1541Error::Internal(_) => libc::EIO,
+            Fs1541Error::Timeout(_, _) => libc::ETIMEDOUT,
+            Fs1541Error::ReadOnly(_) => libc::EROFS,
+            Fs1541Error::WriteOnly(_) => libc::EACCES,
+            Fs1541Error::ReadOrWriteOnly(_) => libc::EINVAL,
+            Fs1541Error::FileAccess(_) => libc::EACCES,
+            Fs1541Error::IsDir(_) => libc::EISDIR,
+        }
+    }
 }

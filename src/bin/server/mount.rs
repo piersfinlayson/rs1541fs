@@ -1,13 +1,14 @@
 use fs1541::error::{Error, Fs1541Error};
 use fs1541::validate::{validate_mountpoint, ValidationType};
 use rs1541::{validate_device, DeviceValidation};
-use rs1541::{Cbm, CbmDirListing, CbmDriveUnit, CbmErrorNumber, CbmErrorNumberOk, CbmFileEntry};
+use rs1541::{
+    Cbm, CbmDeviceInfo, CbmDirListing, CbmDriveUnit, CbmErrorNumber, CbmErrorNumberOk, CbmStatus,
+};
 
 use crate::args::get_args;
 use crate::bg::{OpResponse, OpResponseType, OpType, Operation};
 use crate::drivemgr::DriveManager;
-use crate::file::{ControlFile, ControlFilePurpose, FileEntry, FileEntryType};
-use crate::fusermount::Xattrs;
+use crate::file::{DiskInfo, DiskXattr, DriveXattr, FileEntry, FileEntryType, XattrOps};
 use crate::locking_section;
 
 use fuser::{BackgroundSession, FileAttr, MountOption, FUSE_ROOT_ID};
@@ -20,10 +21,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::SystemTime;
-use strum::IntoEnumIterator;
 use tokio::sync::{Mutex, RwLock};
 
 const NUM_MOUNT_RX_CHANNELS: usize = 2;
+
+// Reserve first 8 bits for disk directories (256 disk)
+const DISK_INO_SHIFT: u64 = 8;
+const FIRST_FILE_INO: u64 = 1u64 << DISK_INO_SHIFT;
 
 /// Cache for directory entries
 ///
@@ -53,12 +57,13 @@ pub struct Mount {
     bg_rsp_rx: Option<Receiver<OpResponse>>,
     directory_cache: Arc<RwLock<DirectoryCache>>,
     fuser: Option<Arc<Mutex<BackgroundSession>>>,
-    files: Vec<FileEntry>,
     next_inode: u64,
     shared_self: Option<Arc<parking_lot::RwLock<Mount>>>,
     bg_rsp_handle: Option<JoinHandle<()>>,
     dir_outstanding: bool,
-    xattrs: Vec<Xattrs>,
+    drive_info: Option<CbmDeviceInfo>,
+    drive_xattrs: Vec<DriveXattr>,
+    disk_info: Vec<DiskInfo>,
 }
 
 impl fmt::Display for Mount {
@@ -101,7 +106,7 @@ impl Mount {
         }));
 
         // Create Mount
-        let mut mount = Ok(Self {
+        let mount = Ok(Self {
             device_num,
             mountpoint: mountpoint.as_ref().to_path_buf(),
             _dummy_formats: dummy_formats,
@@ -113,16 +118,14 @@ impl Mount {
             bg_rsp_rx: Some(rx),
             directory_cache: dir_cache,
             fuser: None,
-            files: Vec::new(),
-            next_inode: FUSE_ROOT_ID + 1,
+            next_inode: FIRST_FILE_INO,
             shared_self: None,
             bg_rsp_handle: None,
             dir_outstanding: false,
-            xattrs: Vec::new(),
+            drive_info: None,
+            drive_xattrs: Vec::new(),
+            disk_info: Vec::new(),
         })?;
-
-        // Create the control files
-        mount.init_control_files();
 
         Ok(mount)
     }
@@ -136,25 +139,11 @@ impl Mount {
     }
     */
 
+    #[allow(dead_code)]
     fn allocate_inode(&mut self) -> u64 {
         let inode = self.next_inode;
         self.next_inode += 1;
         inode
-    }
-
-    fn init_control_files(&mut self) {
-        assert_eq!(self.files.len(), 0);
-        for purpose in ControlFilePurpose::iter() {
-            let control_file = ControlFile::new(purpose);
-            let file_entry = FileEntry::new(
-                control_file.filename(),
-                FileEntryType::ControlFile(control_file),
-                self.allocate_inode(),
-            );
-            self.files.push(file_entry);
-        }
-        debug!("Have {} control files", self.files.len());
-        debug!("Next inode {}", self.next_inode);
     }
 
     pub fn get_device_num(&self) -> u8 {
@@ -165,15 +154,7 @@ impl Mount {
         &self.mountpoint
     }
 
-    async fn create_fuser_mount_options(&self) -> Result<Vec<MountOption>, Error> {
-        if self.fuser.is_some() {
-            return Err(Error::Fs1541 {
-                message: "Failed to create fuser".to_string(),
-                error: Fs1541Error::Validation(
-                    "Cannot mount as we already have a fuser thread".to_string(),
-                ),
-            });
-        }
+    pub fn fuser_mount_options(&self) -> Vec<MountOption> {
         // Build the FUSE options
         let mut options = Vec::new();
         options.push(MountOption::RO);
@@ -182,7 +163,7 @@ impl Mount {
         options.push(MountOption::Sync);
         options.push(MountOption::DirSync);
         options.push(MountOption::NoDev);
-        options.push(MountOption::FSName(self.get_fs_name().await));
+        options.push(MountOption::FSName(self.fs_name()));
         options.push(MountOption::Subtype("1541fs".to_string()));
 
         let args = get_args();
@@ -192,7 +173,7 @@ impl Mount {
             options.push(MountOption::AutoUnmount);
         }
 
-        Ok(options)
+        options
     }
 
     // This mount function is async because locking is required - we have to
@@ -201,8 +182,8 @@ impl Mount {
     // there's no trade off, and it seems a bit more intuitive that the Mount
     // may block.  OTOH it shouldn't because the drive_unit really shouldn't
     // be in use at this point.
-    pub async fn mount(&mut self) -> Result<Vec<MountOption>, Error> {
-        debug!("Mount {} instructed to mount", self);
+    pub async fn mount(&mut self) -> Result<(), Error> {
+        debug!("{} instructed to mount", self);
 
         // Double check we're not already running in fuser
         if self.fuser.is_some() {
@@ -216,8 +197,37 @@ impl Mount {
             });
         }
 
-        // First of all, immediately and syncronously send an
-        // initialize command to the drive (for both drives if appropriate).
+        // Init the drive - this ensures that it is actually functional.  If the drive
+        // can read a disk in one of the drives this returns true - so we kick off a
+        // dir later
+        let do_dir = self.drive_init().await?;
+
+        // Store drive information
+        self.retrieve_drive_info().await;
+        let device_info = self.drive_info.as_ref().unwrap();
+        self.drive_xattrs = DriveXattr::new(
+            self.device_num,
+            device_info.device_type.as_str().to_string(),
+            device_info.description.clone(),
+            self.num_drives(),
+            self.fs_name(),
+            self.mountpoint.to_string_lossy().to_string(),
+            SystemTime::now(),
+            device_info.device_type.dos_version(),
+        );
+
+        // Create disk info
+        self.create_disk_info();
+
+        if do_dir {
+            // As the drive initialization succeeded, kick off a background dir
+            self.do_dir().await;
+        }
+
+        Ok(())
+    }
+
+    async fn drive_init(&mut self) -> Result<bool, Error> {
         // While DOS 2 drives don't need an initialize command before reading
         // the directory, there's no harm in doing so, and may reset some bad
         // state in the drive.  We could also decide to do a soft reset of
@@ -274,6 +284,7 @@ impl Mount {
         for drive_res in result_vec {
             match drive_res {
                 Ok(status) => {
+                    self.update_last_status(&status);
                     if status.is_ok() == CbmErrorNumberOk::Ok {
                         // Init for this drive unit got an OK response - it is
                         // worth us attempting a dir
@@ -302,18 +313,101 @@ impl Mount {
             drive_num += 1;
         }
 
-        if init_succeeded {
-            self.do_dir().await;
+        Ok(init_succeeded)
+    }
+
+    fn update_last_status(&mut self, status: &CbmStatus) {
+        // Get the time
+        let now = SystemTime::now();
+
+        // Update the last status
+        XattrOps::add_or_replace(
+            &mut self.drive_xattrs,
+            &DriveXattr::LastStatus(status.clone()),
+        );
+        XattrOps::add_or_replace(
+            &mut self.drive_xattrs,
+            &DriveXattr::LastStatusTime(now.clone()),
+        );
+
+        // Update the last error, if this is an error (we'll consider 73 an
+        // error here)
+        if status.is_ok() != CbmErrorNumberOk::Ok {
+            XattrOps::add_or_replace(
+                &mut self.drive_xattrs,
+                &DriveXattr::LastError(status.clone()),
+            );
+            XattrOps::add_or_replace(&mut self.drive_xattrs, &DriveXattr::LastErrorTime(now));
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn device_number(&self) -> u8 {
+        self.device_num
+    }
+
+    #[allow(dead_code)]
+    pub fn drive_info(&self) -> Option<&CbmDeviceInfo> {
+        self.drive_info.as_ref()
+    }
+
+    fn create_disk_info(&mut self) {
+        self.disk_info.clear();
+        for ii in 0..self.num_drives() {
+            trace!("Adding disk info for drive {ii}");
+            let mut disk_info = DiskInfo::new(ii);
+            if self.num_drives() > 1 {
+                disk_info.add_disk_dir();
+            }
+            self.disk_info.push(disk_info);
+        }
+        self.inode_disk_info();
+    }
+
+    async fn retrieve_drive_info(&mut self) {
+        locking_section!("Read", "Drive", {
+            let guard = self.drive_unit.read().await;
+            self.drive_info = Some(guard.device_info().clone());
+        });
+    }
+
+    pub fn num_drives(&self) -> u8 {
+        match &self.drive_info {
+            Some(info) => info.device_type.num_disk_drives(),
+            None => 0,
+        }
+    }
+
+    fn inode_disk_info(&mut self) {
+        let mut next_inode = self.next_inode;
+
+        for disk_info in self.disk_info.iter_mut() {
+            for file in disk_info.control_files.iter_mut() {
+                if file.inode() == 0 {
+                    file.set_inode(next_inode);
+                    next_inode += 1;
+                }
+            }
+            for file in disk_info.cbm_files.iter_mut() {
+                if file.inode() == 0 {
+                    file.set_inode(next_inode);
+                    next_inode += 1;
+                }
+            }
+            if let Some(file) = disk_info.disk_dir.as_mut() {
+                if file.inode() == 0 {
+                    file.set_inode(Self::get_drive_ino(disk_info.drive_num));
+                }
+            }
         }
 
-        // Now return the mount options
-        Ok(self.create_fuser_mount_options().await?)
+        self.next_inode = next_inode;
     }
 
     // This code is really unncessary - dropping Mount should cause fuser to
     // exit
     pub fn unmount(&mut self) {
-        debug!("Mount {} unmounting", self);
+        debug!("{} unmounting", self);
         // Setting fuser to None will cause the fuser BackgroundSession to
         // drop (as this is the only instance), in turn causing fuser to exit
         // for this mount
@@ -323,22 +417,21 @@ impl Mount {
     }
 
     // We use the format CbmDeviceType_dev<num>
-    async fn get_fs_name(&self) -> String {
-        locking_section!("Read", "Drive", {
-            let guard = self.drive_unit.read().await;
-            let dir_string = match guard.device_type.num_disk_drives() {
-                1 => "_d0",
-                2 => "_d0_d1",
-                _ => "",
-            };
+    fn fs_name(&self) -> String {
+        let dir_string = if self.num_drives() > 1 {
+            (0..self.num_drives())
+                .map(|ii| format!("_d{}", ii))
+                .collect::<String>()
+        } else {
+            "".to_string()
+        };
 
-            format!(
-                "{}_u{}{}",
-                guard.device_type.to_fs_name().to_lowercase(),
-                guard.device_number.to_string(),
-                dir_string,
-            )
-        })
+        let name = match &self.drive_info {
+            Some(drive_info) => &drive_info.device_type.to_fs_name().to_lowercase(),
+            None => "cbm",
+        };
+
+        format!("{}_u{}{}", name, self.device_num, dir_string,)
     }
 
     pub fn update_fuser(&mut self, fuser: BackgroundSession) {
@@ -346,26 +439,64 @@ impl Mount {
     }
 
     async fn do_dir(&mut self) {
-        // Send a request off to the BG processor to read the directory (and
-        // reply back to us when done)
-        let op = Operation::new(
-            OpType::ReadDirectory {
-                drive_unit: self.drive_unit.clone(),
-            },
-            self.bg_rsp_tx.clone(),
-            None,
-        );
-        match self.bg_proc_tx.send_async(op).await {
-            Ok(_) => {
-                debug!("Sent read directory request to BG processor");
-                self.dir_outstanding = true;
+        if !self.dir_outstanding {
+            // Send a request off to the BG processor to read the directory (and
+            // reply back to us when done)
+            let op = Operation::new(
+                OpType::ReadDirectory {
+                    drive_unit: self.drive_unit.clone(),
+                },
+                self.bg_rsp_tx.clone(),
+                None,
+            );
+            match self.bg_proc_tx.send_async(op).await {
+                Ok(_) => {
+                    debug!("Sent read directory request to BG processor");
+                    self.dir_outstanding = true;
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to send read directory request to BG processor: {}",
+                        e
+                    );
+                }
             }
-            Err(e) => {
-                warn!(
-                    "Failed to send read directory request to BG processor: {}",
-                    e
-                );
+        } else {
+            debug!("No sending dir request, as we have one oustanding");
+        }
+    }
+
+    pub fn do_dir_sync(&mut self) -> Result<(), Error> {
+        if !self.dir_outstanding {
+            // Send a request off to the BG processor to read the directory (and
+            // reply back to us when done)
+            let op = Operation::new(
+                OpType::ReadDirectory {
+                    drive_unit: self.drive_unit.clone(),
+                },
+                self.bg_rsp_tx.clone(),
+                None,
+            );
+            match self.bg_proc_tx.send(op) {
+                Ok(_) => {
+                    debug!("Sent read directory request to BG processor");
+                    self.dir_outstanding = true;
+                    Ok(())
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to send read directory request to BG processor: {}",
+                        e
+                    );
+                    Err(Error::Fs1541 {
+                        message: "Failed to send read diretory request".into(),
+                        error: Fs1541Error::Operation(e.to_string()),
+                    })
+                }
             }
+        } else {
+            debug!("No sending dir request, as we have one oustanding");
+            Ok(())
         }
     }
 
@@ -406,6 +537,13 @@ impl Mount {
         // Get a runtime handle that can be moved into the thread
         let runtime = tokio::runtime::Handle::current();
 
+        // We have to spawn a regular thread here, not a tokio thread, because
+        // the shared_self object is locked with a parking_lot::RwLock
+        // rather than a tokio one, which means we can't pass into a tokio
+        // spawned thread.
+        // We need a parking_lot::RwLock for shared_self, because FuserMount
+        // also has a reference to it, and that is running in a regular
+        // thread (spawned by fuser), so we can't use a tokio RwLock there.
         let join_handle = std::thread::spawn(move || {
             // Create a blocking task in this thread that runs our async code
             runtime
@@ -426,7 +564,7 @@ impl Mount {
         };
 
         match rsp {
-            OpResponseType::ReadDirectory { listings } => {
+            OpResponseType::ReadDirectory { status, listings } => {
                 locking_section!("RwLock", "Mount", {
                     let mut guard = shared_self.write();
                     if !guard.dir_outstanding {
@@ -434,6 +572,7 @@ impl Mount {
                     }
                     guard.dir_outstanding = false;
                     guard.process_directory_listings(listings);
+                    guard.update_last_status(&status);
                 });
             }
             _ => {
@@ -463,58 +602,85 @@ impl Mount {
     }
 
     fn process_directory_listings(&mut self, listings: Vec<CbmDirListing>) {
-        let mut drives: Vec<Vec<FileEntry>> = vec![Vec::new(); 2]; // Initialize vec for drives 0 and 1
-
         for listing in listings {
             let drive_num = listing.header.drive_number as usize;
+
             if drive_num > 1 {
+                warn!("Found drive number > 1 {drive_num}");
                 continue; // Skip invalid drive numbers
             }
 
-            // Add xattrs first
-            self.xattrs = Xattrs::create_user(
-                &listing.header.name,
-                &listing.header.id,
-                listing.blocks_free,
-            );
-            debug!("Added xattrs: {:?}", self.xattrs);
+            let disk_info = &mut self.disk_info[drive_num];
 
-            // Process each file in the listing
-            for (idx, file) in listing.files.iter().enumerate() {
-                let file_entry = FileEntry::new(
-                    match file {
-                        CbmFileEntry::ValidFile { filename, .. } => filename.clone(),
-                        CbmFileEntry::InvalidFile {
-                            partial_filename, ..
-                        } => partial_filename
-                            .clone()
-                            .unwrap_or_else(|| format!("INVALID_{}", idx)),
-                    },
-                    FileEntryType::CbmFile(file.clone()),
-                    self.allocate_inode(),
-                );
-                trace!(
-                    "Adding file entry: {} inode: {}",
-                    file_entry.fuse.name,
-                    file_entry.fuse.ino
-                );
-                drives[drive_num].push(file_entry);
+            // Note this leaves new file inodes as 0
+            disk_info.update_from_dir_listing(&listing);
+        }
+
+        // Must add non-zero inodes to those without 0 inodes
+        self.inode_disk_info();
+    }
+
+    pub fn file_by_inode(&self, inode: u64) -> Option<&FileEntry> {
+        for disk_info in self.disk_info.iter() {
+            let entry = disk_info.control_files.iter().find(|f| f.inode() == inode);
+            if entry.is_some() {
+                return entry;
+            }
+
+            let entry = disk_info.cbm_files.iter().find(|f| f.inode() == inode);
+            if entry.is_some() {
+                return entry;
+            }
+
+            if let Some(entry) = disk_info.disk_dir.as_ref() {
+                if entry.inode() == inode {
+                    return disk_info.disk_dir.as_ref();
+                }
             }
         }
+        None
+    }
 
-        self.files = Vec::new();
-        self.init_control_files();
-        for drive in drives {
-            self.files.extend(drive);
+    pub fn get_drive_ino(drive_num: u8) -> u64 {
+        drive_num as u64 + FUSE_ROOT_ID + 1
+    }
+
+    pub fn disk_xattrs(&self, drive_num: u8) -> &Vec<DiskXattr> {
+        &self.disk_info[drive_num as usize].xattrs
+    }
+
+    pub fn drive_xattrs(&self) -> &Vec<DriveXattr> {
+        &self.drive_xattrs
+    }
+
+    pub fn disk_info(&self) -> &Vec<DiskInfo> {
+        &self.disk_info
+    }
+
+    pub fn get_drive_files(&self, drive_num: u8) -> Vec<FileEntry> {
+        if drive_num < self.num_drives() {
+            self.disk_info[drive_num as usize].files()
+        } else {
+            warn!("Drive number out of range: {drive_num}");
+            Vec::new()
         }
     }
 
-    pub fn files(&self) -> &Vec<FileEntry> {
-        &self.files
+    pub fn get_drive_dir(&self, drive_num: u8) -> Option<FileEntry> {
+        if drive_num < self.num_drives() {
+            self.disk_info[drive_num as usize].disk_dir.clone()
+        } else {
+            warn!("Drive number out of range: {drive_num}");
+            None
+        }
     }
 
-    pub fn xattrs(&self) -> &Vec<Xattrs> {
-        &self.xattrs
+    pub fn get_drive_num_by_inode(&self, inode: u64) -> Option<u8> {
+        self.file_by_inode(inode)
+            .and_then(|file_entry| match file_entry.native {
+                FileEntryType::Directory(drive_num) => Some(drive_num),
+                _ => None,
+            })
     }
 }
 
