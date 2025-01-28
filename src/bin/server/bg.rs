@@ -1,3 +1,4 @@
+use crate::args::get_args;
 use crate::drivemgr::DriveManager;
 use crate::locking_section;
 use crate::mount::Mount;
@@ -5,7 +6,7 @@ use crate::mountsvc::MountService;
 use fs1541::error::{Error, Fs1541Error};
 /// Background processing - provides a single worker thread which handles IPC
 /// and background tasks on behalf of Mounts
-use rs1541::{Cbm, CbmDeviceInfo, CbmDirListing, CbmDriveUnit, CbmStatus};
+use rs1541::{Cbm, CbmDeviceInfo, CbmDirListing, CbmDriveUnit, CbmStatus, CbmString};
 
 use flume::{Receiver, Sender};
 use log::{debug, error, info, trace, warn};
@@ -20,8 +21,6 @@ use tokio::sync::{Mutex, RwLock};
 
 // Max number of BackgroundProcess channels which willbe opened
 pub const MAX_BG_CHANNELS: usize = 16;
-const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
-const MAX_OPERATION_AGE: Duration = Duration::from_secs(300);
 
 /// Background operation types for Commodore disk operations
 #[derive(Debug, Clone)]
@@ -47,17 +46,15 @@ pub enum OpType {
         drive_unit: Arc<RwLock<CbmDriveUnit>>,
     },
     ReadFile {
+        drive_unit: Arc<RwLock<CbmDriveUnit>>,
         device: u8,
-        drive_unit: u8,
-        path: PathBuf,
-        // Optional offset/length if we want to read only part of the file
-        offset: Option<u64>,
-        length: Option<u64>,
+        path: String,
+        inode: u64,
     },
     WriteFile {
+        drive_unit: Arc<RwLock<CbmDriveUnit>>,
         device: u8,
-        drive_unit: u8,
-        path: PathBuf,
+        path: String,
         data: Vec<u8>,
     },
 
@@ -66,10 +63,6 @@ pub enum OpType {
         device: u8,
         drive_unit: u8,
     },
-    ValidateDrive {
-        // Verify drive is responding correctly
-        device: u8,
-    },
     Identify {
         device: u8,
     },
@@ -77,14 +70,17 @@ pub enum OpType {
         device: u8,
     },
 
-    /// Background maintenance operations
-    UpdateDirectoryCache,
-    ReadCacheFile {
-        path: PathBuf,
+    /// Read a file for caching purposes (will be given lower priority)
+    ReadFileCache {
+        drive_unit: Arc<RwLock<CbmDriveUnit>>,
+        device: u8,
+        path: String,
+        inode: u64,
     },
-    InvalidateCache {
-        // Invalidate specific file or entire cache if None
-        path: Option<PathBuf>,
+
+    /// Cancel all outstanding cache operations for a device
+    CancelDeviceCache {
+        device: u8,
     },
 }
 
@@ -98,12 +94,10 @@ impl std::fmt::Display for OpType {
             OpType::ReadFile { .. } => write!(f, "ReadFile"),
             OpType::WriteFile { .. } => write!(f, "WriteFile"),
             OpType::InitDrive { .. } => write!(f, "InitDrive"),
-            OpType::ValidateDrive { .. } => write!(f, "ValidateDrive"),
             OpType::Identify { .. } => write!(f, "Identify"),
             OpType::GetStatus { .. } => write!(f, "GetStatus"),
-            OpType::UpdateDirectoryCache => write!(f, "UpdateDirectoryCache"),
-            OpType::ReadCacheFile { .. } => write!(f, "ReadCacheFile"),
-            OpType::InvalidateCache { .. } => write!(f, "InvalidateCache"),
+            OpType::ReadFileCache { .. } => write!(f, "ReadFileCache"),
+            OpType::CancelDeviceCache { .. } => write!(f, "CancelDeviceCache"),
         }
     }
 }
@@ -125,16 +119,17 @@ impl OpType {
             Self::ReadDirectory { .. } => Priority::Normal,
 
             // Drive operations are normal priority
-            Self::InitDrive { .. } | Self::ValidateDrive { .. } => Priority::Normal,
+            Self::InitDrive { .. } => Priority::Normal,
 
             // Status operations are normal priority
             Self::Identify { .. } | Self::GetStatus { .. } => Priority::Normal,
 
             // Cache operations are low priority
-            Self::UpdateDirectoryCache | Self::ReadCacheFile { .. } => Priority::Low,
+            Self::ReadFileCache { .. } => Priority::Low,
 
-            // Cache invalidation is low priority
-            Self::InvalidateCache { .. } => Priority::Low,
+            // Cancelling cache operations is a critical priority (as it will
+            // clear space for other operations)
+            Self::CancelDeviceCache { .. } => Priority::Critical,
         }
     }
 
@@ -143,31 +138,14 @@ impl OpType {
         self.priority().timeout()
     }
 
-    /// Whether this operation can be cancelled if a higher priority operation comes in
-    pub fn is_cancellable(&self) -> bool {
-        match self {
-            // Critical operations cannot be cancelled
-            Self::BusReset | Self::Mount { .. } | Self::Unmount { .. } => false,
-
-            // Most background operations can be cancelled
-            Self::UpdateDirectoryCache | Self::ReadCacheFile { .. } => true,
-
-            // In-progress file operations probably shouldn't be cancelled
-            Self::ReadFile { .. } | Self::WriteFile { .. } => false,
-
-            // Other operations can generally be cancelled
-            _ => true,
-        }
-    }
-
     /// Whether this operation affects the entire bus or just a single drive
     pub fn affects_bus(&self) -> bool {
         matches!(self, Self::BusReset)
     }
 
     /// Whether this operation requires exclusive access to the drive
-    pub fn requires_drive_lock(&self) -> bool {
-        !matches!(self, Self::InvalidateCache { .. })
+    pub fn requires_drive_access(&self) -> bool {
+        !matches!(self, Self::CancelDeviceCache { .. })
     }
 }
 
@@ -200,28 +178,27 @@ impl std::fmt::Display for OpResponse {
                     }
 
                     OpResponseType::ReadFile {
-                        status, bytes_read, ..
+                        contents, status, ..
                     } => write!(
                         f,
                         "Read File - {} bytes read, status: {}",
-                        bytes_read, status
+                        contents.len(),
+                        status
                     ),
 
                     OpResponseType::WriteFile {
+                        device,
+                        path,
                         status,
                         bytes_written,
                     } => write!(
                         f,
-                        "Write File - {} bytes written, status: {}",
-                        bytes_written, status
+                        "Write File {} {} - {} bytes written, status: {}",
+                        device, path, bytes_written, status
                     ),
 
                     OpResponseType::InitDrive { status } => {
                         write!(f, "Init Drive - status: {}", status)
-                    }
-
-                    OpResponseType::ValidateDrive { status } => {
-                        write!(f, "Validate Drive - status: {}", status)
                     }
 
                     OpResponseType::Identify { info } => {
@@ -230,19 +207,18 @@ impl std::fmt::Display for OpResponse {
 
                     OpResponseType::GetStatus { status } => write!(f, "Get Status - {}", status),
 
-                    OpResponseType::UpdateDirectoryCache { status } => {
-                        write!(f, "Update Directory Cache - {} entries", status.len())
-                    }
-
-                    OpResponseType::ReadCacheFile {
-                        status, bytes_read, ..
+                    OpResponseType::ReadFileCache {
+                        contents, status, ..
                     } => write!(
                         f,
                         "Read Cache File - {} bytes read, status: {}",
-                        bytes_read, status
+                        contents.len(),
+                        status
                     ),
 
-                    OpResponseType::InvalidateCache() => write!(f, "Invalidate Cache"),
+                    OpResponseType::CancelDeviceCache { device } => {
+                        write!(f, "Cancel Device Cache {device}")
+                    }
                 }?;
 
                 // Add stream status if relevant
@@ -272,19 +248,19 @@ pub enum OpResponseType {
         listings: Vec<CbmDirListing>,
     },
     ReadFile {
+        device: u8,
+        path: String,
+        inode: u64,
         status: CbmStatus,
-        _contents: Vec<u8>,
-        bytes_read: u64,
+        contents: Vec<u8>,
     },
-    /// WriteFile returns stat
     WriteFile {
+        device: u8,
+        path: String,
         status: CbmStatus,
         bytes_written: u64,
     },
     InitDrive {
-        status: CbmStatus,
-    },
-    ValidateDrive {
         status: CbmStatus,
     },
     Identify {
@@ -293,15 +269,16 @@ pub enum OpResponseType {
     GetStatus {
         status: CbmStatus,
     },
-    UpdateDirectoryCache {
-        status: Vec<CbmStatus>,
-    },
-    ReadCacheFile {
+    ReadFileCache {
+        device: u8,
+        path: String,
+        inode: u64,
         status: CbmStatus,
-        _contents: Vec<u8>,
-        bytes_read: u64,
+        contents: Vec<u8>,
     },
-    InvalidateCache(),
+    CancelDeviceCache {
+        device: u8,
+    },
 }
 
 impl From<OpType> for OpResponseType {
@@ -318,22 +295,27 @@ impl From<OpType> for OpResponseType {
                 listings: Vec::new(),
             },
 
-            OpType::ReadFile { .. } => OpResponseType::ReadFile {
+            OpType::ReadFile {
+                device,
+                path,
+                inode,
+                ..
+            } => OpResponseType::ReadFile {
+                device,
+                path,
+                inode,
                 status: CbmStatus::default(),
-                _contents: Vec::new(),
-                bytes_read: 0,
+                contents: Vec::new(),
             },
 
-            OpType::WriteFile { .. } => OpResponseType::WriteFile {
+            OpType::WriteFile { device, path, .. } => OpResponseType::WriteFile {
+                device,
+                path,
                 status: CbmStatus::default(),
                 bytes_written: 0,
             },
 
             OpType::InitDrive { .. } => OpResponseType::InitDrive {
-                status: CbmStatus::default(),
-            },
-
-            OpType::ValidateDrive { .. } => OpResponseType::ValidateDrive {
                 status: CbmStatus::default(),
             },
 
@@ -345,17 +327,20 @@ impl From<OpType> for OpResponseType {
                 status: CbmStatus::default(),
             },
 
-            OpType::UpdateDirectoryCache => {
-                OpResponseType::UpdateDirectoryCache { status: Vec::new() }
-            }
-
-            OpType::ReadCacheFile { .. } => OpResponseType::ReadCacheFile {
+            OpType::ReadFileCache {
+                device,
+                path,
+                inode,
+                ..
+            } => OpResponseType::ReadFileCache {
+                device,
+                path,
+                inode,
                 status: CbmStatus::default(),
-                _contents: Vec::new(),
-                bytes_read: 0,
+                contents: Vec::new(),
             },
 
-            OpType::InvalidateCache { .. } => OpResponseType::InvalidateCache(),
+            OpType::CancelDeviceCache { device } => OpResponseType::CancelDeviceCache { device },
         }
     }
 }
@@ -504,54 +489,85 @@ impl OperationQueues {
             .or_else(|| self.low.pop_front())
     }
 
-    async fn cleanup(&mut self, max_age: Duration) {
-        // Define a regular async function instead of a closure
-        async fn cleanup_queue(queue: &mut VecDeque<Operation>, max_age: Duration) {
-            let now = Instant::now();
+    async fn cleanup_on_age(&mut self) {
+        let now = Instant::now();
+        self.process_all_queues(
+            |op| now.duration_since(op.created_at) >= op.priority_timeout(),
+            |op| Fs1541Error::Timeout(format!("Priority {}", op.priority), op.priority_timeout()),
+        )
+        .await;
+    }
 
-            // Age out operations - this is a bit fiddly as we need mutable ops
-            // in order to take stream
-            let mut aged_out = Vec::new();
-            let mut ii = 0;
-            while ii < queue.len() {
-                if now.duration_since(queue[ii].created_at) >= max_age {
-                    aged_out.push(queue.remove(ii).unwrap());
-                } else {
-                    ii += 1;
-                }
+    async fn remove_cache_for_device(&mut self, device: u8) {
+        self.process_all_queues(
+            |op| matches!(&op.op_type, OpType::ReadFileCache { device: d, .. } if *d == device),
+            |_| Fs1541Error::Cancelled(format!("Device {} cache cleared", device)),
+        )
+        .await;
+    }
+
+    async fn process_all_queues<F, E>(&mut self, should_remove: F, make_error: E)
+    where
+        F: Fn(&Operation) -> bool + Copy,
+        E: Fn(&Operation) -> Fs1541Error + Copy,
+    {
+        for (queue, priority) in [
+            (&mut self.critical, Priority::Critical),
+            (&mut self.high, Priority::High),
+            (&mut self.normal, Priority::Normal),
+            (&mut self.low, Priority::Low),
+        ] {
+            Self::process_queue(queue, priority, should_remove, make_error).await;
+        }
+    }
+
+    // Takes an operation as a test for which items to remove
+    // Another another operation to build the required error response to be
+    // sent to whoever sent us the request
+    async fn process_queue<F, E>(
+        queue: &mut VecDeque<Operation>,
+        priority: Priority,
+        should_remove: F,
+        make_error: E,
+    ) where
+        F: Fn(&Operation) -> bool,
+        E: Fn(&Operation) -> Fs1541Error,
+    {
+        let mut to_remove = Vec::new();
+        let mut ii = 0;
+        while ii < queue.len() {
+            // Double check operation priority is correct
+            if queue[ii].op_type.priority() != priority {
+                warn!(
+                    "Found operation {} on wrong queue {}",
+                    queue[ii].op_type, priority
+                );
             }
 
-            // Report timeouts for aged-out operations
-            for mut op in aged_out {
-                // Create response to send via oneshot
-                let rsp = OpResponse {
-                    rsp: Err(Error::Fs1541 {
-                        message: "Aged out operation".into(),
-                        error: Fs1541Error::Timeout(
-                            format!("Priority {}", op.priority),
-                            op.priority_timeout(),
-                        ),
-                    }),
-                    stream: op.stream.take(),
-                };
-
-                // Send the response - if send fails it returns back the whole
-                // rsp - but we'll just drop it
-                let _ = op.sender.send_async(rsp).await.inspect_err(|e| {
-                    warn!("Hit error reporting timed out operation {} - dropping", e)
-                });
+            if should_remove(&queue[ii]) {
+                to_remove.push(queue.remove(ii).unwrap());
+            } else {
+                ii += 1;
             }
-
-            // This retains items in the queue only that the retain closure
-            // returns true for
-            queue.retain(|op| now.duration_since(op.created_at) < max_age);
         }
 
-        // Now call the async function on each queue
-        cleanup_queue(&mut self.critical, max_age).await;
-        cleanup_queue(&mut self.high, max_age).await;
-        cleanup_queue(&mut self.normal, max_age).await;
-        cleanup_queue(&mut self.low, max_age).await;
+        // Report for removed operations
+        for mut op in to_remove {
+            let error = make_error(&op);
+            let rsp = OpResponse {
+                rsp: Err(Error::Fs1541 {
+                    message: error.to_string(),
+                    error,
+                }),
+                stream: op.stream.take(),
+            };
+
+            let _ = op
+                .sender
+                .send_async(rsp)
+                .await
+                .inspect_err(|e| warn!("Hit error reporting operation {} - dropping", e));
+        }
     }
 }
 
@@ -567,6 +583,7 @@ pub struct Proc {
     cbm: Arc<Mutex<Cbm>>,
     drive_mgr: Arc<Mutex<DriveManager>>,
     mount_svc: MountService,
+    age_check_period: Duration,
 }
 
 impl Proc {
@@ -588,7 +605,108 @@ impl Proc {
             cbm,
             drive_mgr,
             mount_svc,
+            age_check_period: Duration::from_secs(get_args().bg_age_check_secs),
         }
+    }
+
+    pub async fn send_resp(
+        &self,
+        sender: Arc<Sender<OpResponse>>,
+        rsp: OpResponse,
+    ) -> Result<(), Error> {
+        debug!("Attempting to send response from background processor");
+        let send_result = sender.send_async(rsp).await;
+        match &send_result {
+            Ok(_) => debug!("Successfully sent response through channel"),
+            Err(e) => error!("Failed to send through channel: {:?}", e),
+        }
+        send_result.map_err(|e| Error::Fs1541 {
+            message: "Channel send error".to_string(),
+            error: Fs1541Error::Internal(format!("Failed to send response: {}", e)),
+        })
+    }
+
+    async fn process_operation(&mut self, op: Operation) -> Result<(), Error> {
+        let timeout = op.priority_timeout();
+
+        let sender = op.sender.clone();
+        let resp = match op.op_type {
+            OpType::CancelDeviceCache { device } => {
+                // We have to process a cancel device cache request here
+                // because we require mutable access to self, which
+                // execute_operation doesn't get.  Required because we
+                // may need to remove operations from queues.
+                self.process_cancel_device_cache(device).await
+            }
+            _ => {
+                match tokio::time::timeout(timeout, self.execute_operation(op.op_type.clone()))
+                    .await
+                {
+                    Ok(resp) => {
+                        trace!("Handled Operation with response {:?}", resp);
+                        resp
+                    }
+                    Err(_) => {
+                        debug!("Hit timeout processing background operation {:?}", timeout);
+                        Err(Error::Fs1541 {
+                            message: "Operation timed out".to_string(),
+                            error: Fs1541Error::Timeout(
+                                "Background operation timed out".to_string(),
+                                timeout,
+                            ),
+                        })
+                    }
+                }
+            }
+        };
+
+        let op_response = OpResponse {
+            rsp: resp,
+            stream: op.stream,
+        };
+        self.send_resp(sender, op_response).await
+    }
+
+    pub async fn run(&mut self) {
+        info!("Background operation processor ready");
+
+        while !self.shutdown.load(Ordering::Relaxed) {
+            // Runs each of these in parallel
+            tokio::select! {
+                // Periodic cleanup check
+                _ = tokio::time::sleep(self.age_check_period) => {
+                    self.queues.cleanup_on_age().await;
+                    self.last_cleanup = Instant::now();
+                }
+
+                // Process operations
+                _ = async {
+                    // Check for new operations until we run out
+                    while let Ok(op) = self.operation_receiver.try_recv() {
+                        self.queues.push(op);
+                    }
+
+                    // Process next operation if available
+                    if let Some(op) = self.queues.pop_next() {
+                        match self.process_operation(op).await {
+                            Ok(_) => debug!("Background operation succeeded"),
+                            Err(e) => warn!("Background operation failed {}", e),
+                        }
+                    }
+                    // This sleep is _crucial_ as we are using try_recv() not
+                    // recv().  Otherwise this would be a tight loop and tokio
+                    // might never get the opportunity to process the send()
+                    // call (in send_resp()) and actually send the message
+                    // back.  (Once 4-5 messages are backed up it tends to
+                    // schedule them.)  With this 10ms timer everything else on
+                    // this thread has enough time!
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                } => {}
+            }
+        }
+
+        info!("Background operation processor exited");
+        self.mount_svc.cleanup().await;
     }
 
     async fn execute_operation(&self, op_type: OpType) -> Result<OpResponseType, Error> {
@@ -674,6 +792,43 @@ impl Proc {
                 })
             }
 
+            OpType::ReadFile {
+                drive_unit,
+                device,
+                path,
+                inode,
+            } => {
+                debug!("Read file {device} {path}");
+                let filename = CbmString::from_ascii_bytes(path.as_bytes());
+
+                locking_section!("Lock", "Cbm", {
+                    let mut cbm = self.cbm.lock().await;
+                    locking_section!("Read", "Drive Unit", {
+                        let drive_unit = drive_unit.read().await;
+
+                        drive_unit
+                            .read_file(&mut cbm, &filename)
+                            .map(|(c, s)| OpResponseType::ReadFile {
+                                device,
+                                path: path.clone(),
+                                inode,
+                                status: s,
+                                contents: c,
+                            })
+                            .map_err(|e| Error::Rs1541 {
+                                message: format!(
+                                    "Failed to read file {} for device {}",
+                                    path, drive_unit.device_number
+                                ),
+                                error: e,
+                            })
+                    })
+                })
+            }
+
+            // Handled in process_operation
+            OpType::CancelDeviceCache { .. } => unreachable!(),
+
             _ => Err(Error::Fs1541 {
                 message: format!("Operation not yet supported {}", op_type),
                 error: Fs1541Error::Operation(format!("Operation not supported: {}", op_type)),
@@ -681,90 +836,8 @@ impl Proc {
         }
     }
 
-    pub async fn send_resp(
-        &self,
-        sender: Arc<Sender<OpResponse>>,
-        rsp: OpResponse,
-    ) -> Result<(), Error> {
-        debug!("Attempting to send response from background processor");
-        let send_result = sender.send_async(rsp).await;
-        match &send_result {
-            Ok(_) => debug!("Successfully sent response through channel"),
-            Err(e) => error!("Failed to send through channel: {:?}", e),
-        }
-        send_result.map_err(|e| Error::Fs1541 {
-            message: "Channel send error".to_string(),
-            error: Fs1541Error::Internal(format!("Failed to send response: {}", e)),
-        })
-    }
-
-    async fn process_operation(&mut self, op: Operation) -> Result<(), Error> {
-        let timeout = op.priority_timeout();
-
-        let sender = op.sender.clone();
-        let resp =
-            match tokio::time::timeout(timeout, self.execute_operation(op.op_type.clone())).await {
-                Ok(resp) => {
-                    trace!("Handled Operation with response {:?}", resp);
-                    resp
-                }
-                Err(_) => {
-                    debug!("Hit timeout processing background operation {:?}", timeout);
-                    Err(Error::Fs1541 {
-                        message: "Operation timed out".to_string(),
-                        error: Fs1541Error::Timeout(
-                            "Background operation timed out".to_string(),
-                            timeout,
-                        ),
-                    })
-                }
-            };
-
-        let op_response = OpResponse {
-            rsp: resp,
-            stream: op.stream,
-        };
-        self.send_resp(sender, op_response).await
-    }
-
-    pub async fn run(&mut self) {
-        info!("Background operation processor ready");
-
-        while !self.shutdown.load(Ordering::Relaxed) {
-            tokio::select! {
-                // Periodic cleanup check
-                _ = tokio::time::sleep(CLEANUP_INTERVAL) => {
-                    self.queues.cleanup(MAX_OPERATION_AGE).await;
-                    self.last_cleanup = Instant::now();
-                }
-
-                // Process operations
-                _ = async {
-                    // Check for new operations until we run out
-                    while let Ok(op) = self.operation_receiver.try_recv() {
-                        self.queues.push(op);
-                    }
-
-                    // Process next operation if available
-                    if let Some(op) = self.queues.pop_next() {
-                        match self.process_operation(op).await {
-                            Ok(_) => debug!("Background operation succeeded"),
-                            Err(e) => warn!("Background operation failed {}", e),
-                        }
-                    }
-                    // This sleep is _crucial_ as we are using try_recv() not
-                    // recv().  Otherwise this would be a tight loop and tokio
-                    // might never get the opportunity to process the send()
-                    // call (in send_resp()) and actually send the message
-                    // back.  (Once 4-5 messages are backed up it tends to
-                    // schedule them.)  With this 10ms timer everything else on
-                    // this thread has enough time!
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                } => {}
-            }
-        }
-
-        info!("Background operation processor exited");
-        self.mount_svc.cleanup().await;
+    async fn process_cancel_device_cache(&mut self, device: u8) -> Result<OpResponseType, Error> {
+        self.queues.remove_cache_for_device(device).await;
+        Ok(OpResponseType::CancelDeviceCache { device })
     }
 }

@@ -9,7 +9,7 @@ use fuser::{FileAttr, FileType, FUSE_ROOT_ID};
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
 use std::fmt::{self, Display};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
@@ -386,7 +386,7 @@ impl FileXattr {
                 } else {
                     CacheStatus::InProgress
                 }));
-                xattrs.push(FileXattr::CacheSize(cache.cache.len()));
+                xattrs.push(FileXattr::CacheSize(cache.data.len()));
                 xattrs.push(FileXattr::CacheStartTime(cache.cache_start));
                 if let Some(complete_time) = cache.cache_complete {
                     xattrs.push(FileXattr::CacheCompleteTime(Some(complete_time)));
@@ -550,7 +550,7 @@ impl ControlFile {
 
     /// Some control files have static text content, which is returned by this
     /// function
-    fn read_static(&self) -> Option<Vec<u8>> {
+    pub fn read_static(&self) -> Option<Vec<u8>> {
         match self.purpose {
             ControlFilePurpose::GetCurDriveStatus => None,
             ControlFilePurpose::GetLastDriveStatus => None,
@@ -636,7 +636,9 @@ impl ControlFile {
 
         match self.purpose {
             // TODO - fix drive_num in ExecDirRefresh
-            ControlFilePurpose::ExecDirRefresh => mount.do_dir_sync(0).map(|_| data.len() as u32),
+            ControlFilePurpose::ExecDirRefresh => {
+                mount.do_dir_sync(0, false).map(|_| data.len() as u32)
+            }
             ControlFilePurpose::ExecDriveCommand => Err(Error::Fs1541 {
                 message: "Not implemented".to_string(),
                 error: Fs1541Error::Internal("ExecDriveCommand not implemented".to_string()),
@@ -694,9 +696,9 @@ impl FuseFile {
 /// This cache accumulates file data as it's read, without requiring
 /// knowledge of the final size in advance.
 #[derive(Debug, Clone)]
-struct FileCache {
+pub struct FileCache {
     /// The cached file data accumulated so far
-    cache: Vec<u8>,
+    data: Vec<u8>,
     /// Whether we've reached the end of the file
     is_complete: bool,
     /// When we started caching this file
@@ -717,12 +719,16 @@ impl FileCache {
     pub fn new() -> Self {
         let now = SystemTime::now();
         FileCache {
-            cache: Vec::new(),
+            data: Vec::new(),
             is_complete: false,
             cache_start: now,
             cache_complete: None,
             last_device_read: now,
         }
+    }
+
+    pub fn cache_complete_time(&self) -> &Option<SystemTime> {
+        &self.cache_complete
     }
 
     /// Checks if we've reached the end of the file and cached all data.
@@ -743,7 +749,7 @@ impl FileCache {
     /// cache.add_chunk(&[5, 6], true);        // Final chunk
     /// ```
     pub fn add_chunk(&mut self, data: &[u8], is_final_chunk: bool) {
-        self.cache.extend_from_slice(data);
+        self.data.extend_from_slice(data);
         self.is_complete = is_final_chunk;
         self.last_device_read = SystemTime::now();
         if is_final_chunk {
@@ -754,12 +760,50 @@ impl FileCache {
 
     /// Returns the current size of cached data
     pub fn len(&self) -> usize {
-        self.cache.len()
+        self.data.len()
+    }
+
+    /// Returns the cached data as a reference
+    pub fn get_data(&self) -> &Vec<u8> {
+        &self.data
     }
 
     /// Returns true if no data has been cached yet
     pub fn is_empty(&self) -> bool {
-        self.cache.is_empty()
+        self.data.is_empty()
+    }
+
+    pub fn set_data_complete(&mut self, data: &[u8]) {
+        self.data = Vec::new();
+        self.add_chunk(data, true);
+    }
+
+    /// Allows caller to pass in a Duration and will check if the cache is
+    /// complete and at least that fresh
+    pub fn get_data_complete_and_fresh(&self, cache_duration: Duration) -> Option<&Vec<u8>> {
+        if self.is_fully_cached() {
+            if let Some(cache_time) = self.cache_complete {
+                trace!("File cache is complete");
+                if let Ok(duration) = SystemTime::now().duration_since(cache_time) {
+                    if duration < cache_duration {
+                        trace!("File cache is still valid");
+                        Some(self.get_data())
+                    } else {
+                        trace!("File cache is stale");
+                        None
+                    }
+                } else {
+                    warn!("Can't get duration since cached data read, using anyway");
+                    None
+                }
+            } else {
+                warn!("File is not fully cached (and cache is inconsistent)");
+                None
+            }
+        } else {
+            trace!("File is not fully cached");
+            None
+        }
     }
 }
 
@@ -795,7 +839,7 @@ pub struct FileEntry {
     write_buffer: Option<Buffer>,
 
     /// File cache
-    cache: Option<FileCache>,
+    pub cache: Option<FileCache>,
 }
 
 impl FileEntry {

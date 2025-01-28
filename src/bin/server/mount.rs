@@ -1,6 +1,6 @@
 use fs1541::error::{Error, Fs1541Error};
 use fs1541::validate::{validate_mountpoint, ValidationType};
-use rs1541::{validate_device, DeviceValidation};
+use rs1541::{validate_device, CbmFileEntry, DeviceValidation};
 use rs1541::{
     Cbm, CbmDeviceInfo, CbmDirListing, CbmDriveUnit, CbmErrorNumber, CbmErrorNumberOk, CbmStatus,
 };
@@ -8,7 +8,7 @@ use rs1541::{
 use crate::args::get_args;
 use crate::bg::{OpResponse, OpResponseType, OpType, Operation};
 use crate::drivemgr::DriveManager;
-use crate::file::{DiskInfo, DiskXattr, DriveXattr, FileEntry, FileEntryType, XattrOps};
+use crate::file::{DiskInfo, DiskXattr, DriveXattr, FileCache, FileEntry, FileEntryType, XattrOps};
 use crate::locking_section;
 
 use fuser::{BackgroundSession, FileAttr, MountOption, FUSE_ROOT_ID};
@@ -457,10 +457,11 @@ impl Mount {
         }
     }
 
-    pub fn do_dir_sync(&mut self, _drive_num: u8) -> Result<(), Error> {
-        if !self.dir_outstanding {
-            // Send a request off to the BG processor to read the directory (and
-            // reply back to us when done)
+    /// Send a request to thg BG processor to read the directory.  Reply back
+    /// when done
+    pub fn do_dir_sync(&mut self, _drive_num: u8, force: bool) -> Result<(), Error> {
+        if force || !self.dir_outstanding {
+            // Build the operation
             let op = Operation::new(
                 OpType::ReadDirectory {
                     drive_unit: self.drive_unit.clone(),
@@ -468,23 +469,10 @@ impl Mount {
                 self.bg_rsp_tx.clone(),
                 None,
             );
-            match self.bg_proc_tx.send(op) {
-                Ok(_) => {
-                    debug!("Sent read directory request to BG processor");
-                    self.dir_outstanding = true;
-                    Ok(())
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to send read directory request to BG processor: {}",
-                        e
-                    );
-                    Err(Error::Fs1541 {
-                        message: "Failed to send read diretory request".into(),
-                        error: Fs1541Error::Operation(e.to_string()),
-                    })
-                }
-            }
+
+            // Send it
+            send_sync_to_bg_proc(self.bg_proc_tx.clone(), op)
+                .inspect(|_| self.dir_outstanding = true)
         } else {
             debug!("Not sending dir request, as we have one oustanding");
             Ok(())
@@ -560,7 +548,7 @@ impl Mount {
 
         match rsp {
             OpResponseType::ReadDirectory { status, listings } => {
-                locking_section!("RwLock", "Mount", {
+                locking_section!("Write", "Mount", {
                     let mut guard = shared_self.write();
                     if !guard.dir_outstanding {
                         warn!("Received ReadDirectory listing when one wasn't outstanding");
@@ -570,6 +558,53 @@ impl Mount {
                     guard.update_last_status(&status);
                 });
             }
+
+            OpResponseType::ReadFile {
+                device: _,
+                path,
+                inode,
+                status,
+                contents,
+            } => {
+                locking_section!("Write", "Mount", {
+                    let mut mount = shared_self.write();
+
+                    let Some(file) = mount.file_by_inode_mut(inode) else {
+                        warn!(
+                            "No file found for read response inode: {} file: {}",
+                            inode, path
+                        );
+                        return;
+                    };
+
+                    // Check status is OK
+                    if status.is_ok() != CbmErrorNumberOk::Ok {
+                        info!(
+                            "File read status {} for inode: {} file: {}",
+                            status, inode, path
+                        );
+
+                        // Remove the cache, as we're clearly not going to be
+                        // able to read
+                        file.cache = None;
+                        return;
+                    }
+
+                    // Check we have some contents
+                    if contents.len() <= 0 {
+                        warn!("Read file claimed to succeed, but 0 bytes read inode: {inode} file: {path}");
+                        // We'll fall through to set the cache anyway
+                    }
+
+                    trace!("Setting cache data length to {}", contents.len());
+                    if file.cache.is_none() {
+                        trace!("File cache didn't exist for inode {} file {}", inode, path);
+                        file.cache = Some(FileCache::new());
+                    }
+                    file.cache.as_mut().unwrap().set_data_complete(&contents);
+                });
+            }
+
             _ => {
                 warn!("Unexpected response from BG processor: {:?}", rsp);
             }
@@ -614,22 +649,60 @@ impl Mount {
         // Must add non-zero inodes to those without 0 inodes
         self.inode_disk_info();
     }
+    fn file_by_inode_mut(&mut self, inode: u64) -> Option<&mut FileEntry> {
+        self.disk_info.iter_mut().find_map(|disk_info| {
+            // Check control files
+            if let Some(file) = disk_info
+                .control_files
+                .iter_mut()
+                .find(|f| f.inode() == inode)
+            {
+                return Some(file);
+            }
+
+            // Check CBM files
+            if let Some(file) = disk_info.cbm_files.iter_mut().find(|f| f.inode() == inode) {
+                return Some(file);
+            }
+
+            // Check disk directory
+            disk_info
+                .disk_dir
+                .as_mut()
+                .filter(|dir| dir.inode() == inode)
+        })
+    }
 
     pub fn file_by_inode(&self, inode: u64) -> Option<&FileEntry> {
-        for disk_info in self.disk_info.iter() {
-            let entry = disk_info.control_files.iter().find(|f| f.inode() == inode);
-            if entry.is_some() {
-                return entry;
+        self.disk_info.iter().find_map(|disk_info| {
+            // Check control files
+            if let Some(file) = disk_info.control_files.iter().find(|f| f.inode() == inode) {
+                return Some(file);
             }
 
-            let entry = disk_info.cbm_files.iter().find(|f| f.inode() == inode);
-            if entry.is_some() {
-                return entry;
+            // Check CBM files
+            if let Some(file) = disk_info.cbm_files.iter().find(|f| f.inode() == inode) {
+                return Some(file);
             }
 
-            if let Some(entry) = disk_info.disk_dir.as_ref() {
-                if entry.inode() == inode {
-                    return disk_info.disk_dir.as_ref();
+            // Check disk directory
+            disk_info
+                .disk_dir
+                .as_ref()
+                .filter(|dir| dir.inode() == inode)
+        })
+    }
+
+    fn _get_drive_num_from_file(&self, file: &FileEntry) -> Option<u8> {
+        self.get_drive_num_by_inode(file.fuse.ino)
+    }
+
+    fn get_drive_num_from_inode(&self, inode: u64) -> Option<u8> {
+        // Iterate through the disk info, looking for the inode
+        for (ii, disk_info) in self.disk_info.iter().enumerate() {
+            if let Some(file) = disk_info.disk_dir.as_ref() {
+                if file.inode() == inode {
+                    return Some(ii as u8);
                 }
             }
         }
@@ -702,6 +775,125 @@ impl Mount {
                 Ok(duration) => duration >= cache_duration,
                 Err(_) => true,
             }
+        }
+    }
+
+    /// Submit a read file operation to the BG processor
+    ///
+    /// # Arguments
+    /// [`inode`] - The inode of the file to read
+    /// [`cache`] - Whether this file is for the cache, in which case this request will be given lower priority
+    ///  
+    pub fn read_file_sync(&mut self, inode: u64, cache: bool) -> Result<(), Error> {
+        trace!("Mount::read_file_sync");
+
+        // Extract some values before we access self mutably.
+        let device_num = self.device_num;
+        let bg_rsp_tx = self.bg_rsp_tx.clone();
+        let bg_proc_tx = self.bg_proc_tx.clone();
+        let drive_unit = self.drive_unit.clone();
+
+        let _drive = self.get_drive_num_from_inode(inode).unwrap_or_else(|| {
+            warn!("Failed to get drive number from file, using 0");
+            0
+        });
+
+        // Get the file entry - we'll need mutable access to modify the cache
+        let file = match self.file_by_inode_mut(inode) {
+            Some(file) => file,
+            None => Err(Error::Fs1541 {
+                message: "File not found".into(),
+                error: Fs1541Error::NoEntry(format!("Inode not found {}", inode)),
+            })?,
+        };
+
+        // Get the filename (includes ensuring we have the proper type of file)
+        let filename = match &file.native {
+            FileEntryType::CbmFile(cbm_file) => match cbm_file {
+                CbmFileEntry::ValidFile { filename, .. } => filename.clone(),
+                CbmFileEntry::InvalidFile { .. } => {
+                    return Err(Error::Fs1541 {
+                        message: "Shouldn't be asking bg processor to read an invalid CBM file"
+                            .into(),
+                        error: Fs1541Error::Internal(file.fuse.name.clone()),
+                    })
+                }
+            },
+            FileEntryType::Directory(_) => {
+                return Err(Error::Fs1541 {
+                    message: "Shouldn't be asking bg processor to read a directory file".into(),
+                    error: Fs1541Error::Internal(file.fuse.name.clone()),
+                })
+            }
+            FileEntryType::ControlFile(_) => {
+                return Err(Error::Fs1541 {
+                    message: "Shouldn't be asking bg processor to read a control file".into(),
+                    error: Fs1541Error::Internal(file.fuse.name.clone()),
+                })
+            }
+        };
+
+        // If there's a cache entry already, and it's incompleted, we will
+        // either leave it (if we've been asked to do a cache read, so it
+        // continues with the same priority), or drop it, and do another one
+        if let Some(file_cache) = &file.cache {
+            if file_cache.is_fully_cached() {
+                debug!(
+                    "Dropping existing file cache for {} {}",
+                    inode, file.fuse.name
+                );
+            } else {
+                if cache {
+                    debug!(
+                        "File cache already in progress for {} {}",
+                        inode, file.fuse.name
+                    );
+                    return Ok(());
+                } else {
+                    info!(
+                        "Dropping in progress cached read for {} {}",
+                        inode, file.fuse.name
+                    );
+                }
+            }
+            file.cache = None;
+        }
+
+        // Build the operation
+        let op_type = if !cache {
+            OpType::ReadFile {
+                drive_unit,
+                device: device_num,
+                path: filename,
+                inode,
+            }
+        } else {
+            OpType::ReadFileCache {
+                drive_unit,
+                device: device_num,
+                path: filename,
+                inode,
+            }
+        };
+        let op = Operation::new(op_type, bg_rsp_tx, None);
+
+        // Send it
+        send_sync_to_bg_proc(bg_proc_tx, op).inspect(|_| file.cache = Some(FileCache::new()))
+    }
+}
+
+fn send_sync_to_bg_proc(bg_proc_tx: Arc<Sender<Operation>>, op: Operation) -> Result<(), Error> {
+    match bg_proc_tx.send(op) {
+        Ok(_) => {
+            trace!("Sent operation to BG processor");
+            Ok(())
+        }
+        Err(e) => {
+            warn!("Failed to send operation to BG processor: {}", e);
+            Err(Error::Fs1541 {
+                message: "Failed to send operation".into(),
+                error: Fs1541Error::Operation(e.to_string()),
+            })
         }
     }
 }

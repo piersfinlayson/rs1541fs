@@ -1,13 +1,13 @@
 use crate::args::get_args;
-use crate::file::{FileEntry, FileEntryType, XattrOps};
+use crate::file::{FileEntry, FileEntryType, RwType, XattrOps};
 use crate::locking_section;
 use crate::mount::Mount;
 use crate::{Error, Fs1541Error};
 
 use either::Either::{self, Right};
 use fuser::{
-    FileAttr, FileType, Filesystem, ReplyAttr, ReplyDirectory, ReplyEntry, ReplyXattr, Request,
-    FUSE_ROOT_ID,
+    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
+    ReplyOpen, ReplyXattr, Request, FUSE_ROOT_ID,
 };
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
@@ -63,6 +63,9 @@ struct Counts {
     /// How many times to check the directory cache before giving up and
     /// continuing anyway.  Used in conjunction with Timers::dir_read_sleep
     dir_check: u32,
+
+    /// Equivalent number of times to check for file reads
+    file_check: u32,
 }
 
 impl Counts {
@@ -73,7 +76,18 @@ impl Counts {
             panic!("FuserMount::Counts::dir_check is too large");
         }
         let dir_check = dir_check as u32;
-        Counts { dir_check }
+
+        let file_check = timer.file_read.as_millis() / timer.file_read_sleep.as_millis();
+        debug!("FuserMount::Counts read_check = {file_check}");
+        if file_check > u32::MAX as u128 {
+            panic!("FuserMount::Counts::read_check is too large");
+        }
+        let file_check = file_check as u32;
+
+        Counts {
+            dir_check,
+            file_check,
+        }
     }
 }
 
@@ -81,23 +95,35 @@ struct Timers {
     /// How long to rely on directory listing read in from a disk
     dir_cache: Duration,
 
+    /// How long to rely on a file cache for
+    file_cache: Duration,
+
     /// How long to wait for a directory read, before returning to the kernel,
     /// should we decide to update the cache.  If this timer expires, we will
     /// log, and reply to the kernel anyway, to avoid delying the kernel
     /// longer than this.
     dir_read: Duration,
 
+    /// File equivalent of dir_read
+    file_read: Duration,
+
     /// How long to sleep between reads of the directory contents cache, to
     /// see if it's been updated.  Used in conjunction with Counts::dir_check
     dir_read_sleep: Duration,
+
+    /// File equivalent of dir_read_sleep
+    file_read_sleep: Duration,
 }
 
 impl Timers {
     fn new() -> Self {
         Timers {
             dir_cache: Duration::from_secs(get_args().dir_cache_expiry_secs),
+            file_cache: Duration::from_secs(get_args().file_cache_expiry_secs),
             dir_read: Duration::from_secs(get_args().dir_reread_timeout_secs),
+            file_read: Duration::from_secs(get_args().file_reread_timeout_secs),
             dir_read_sleep: Duration::from_millis(get_args().dir_read_sleep_ms),
+            file_read_sleep: Duration::from_millis(get_args().file_read_sleep_ms),
         }
     }
 }
@@ -210,10 +236,10 @@ impl Filesystem for FuserMount {
             // Now lookup the filename in the list of files, and return the
             // inode if found
             if let Some(file) = file_entries.iter().find(|f| f.fuse.name == name) {
-                trace!("File found for name {}", name);
+                trace!("File found for fuse filename {name} inode {}", file.fuse.ino);
                 file.clone()
             } else {
-                trace!("File not found for name {}", name);
+                trace!("File not found for fuse filename name {name}");
                 reply.error(libc::ENOENT);
                 return;
             }
@@ -363,7 +389,7 @@ impl Filesystem for FuserMount {
                     // Kick off directory re-read
                     let rsp = locking_section!("Write", "Mount", {
                         let mut mount = self.mount.write();
-                        mount.do_dir_sync(drive_num)
+                        mount.do_dir_sync(drive_num, false)
                     });
 
                     if let Err(e) = rsp {
@@ -578,75 +604,165 @@ impl Filesystem for FuserMount {
         return;
     }
 
-    /*
     fn read(
         &mut self,
         _req: &Request,
-        _ino: u64,
+        ino: u64,
         _fh: u64,
-        _offset: i64,
-        _size: u32,
+        offset: i64,
+        size: u32,
         _flags: i32,
         _lock: Option<u64>,
         reply: ReplyData,
     ) {
-        debug!("FuserMount::Read");
-        reply.error(libc::ENOSYS);
-    }
-    */
+        debug!("FuserMount::read");
+        trace!("ino: {ino} size: {size} offset: {offset}");
 
-    /*
-    fn write(
-        &mut self,
-        _req: &Request<'_>,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
-        data: &[u8],
-        write_flags: u32,
-        flags: i32,
-        lock_owner: Option<u64>,
-        reply: ReplyWrite,
-    ) {
-        debug!("FuserMount::write");
-        if ino == FUSE_ROOT_ID {
-            reply.error(libc::EISDIR);
+        // Find the file we want to read, first of all by seeing if we have
+        // a minty-fresh cached version
+
+        // Start of locking section
+        let data = locking_section!("Read", "Mount", {
+            let mount = self.mount.read();
+
+            // Find the file
+            let file = match mount.file_by_inode(ino) {
+                Some(file) => match file.native {
+                    FileEntryType::CbmFile(_) | FileEntryType::ControlFile(_) => file,
+                    _ => {
+                        reply.error(libc::EISDIR);
+                        return;
+                    }
+                },
+                None => {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+            };
+
+            trace!("Found file: {}", file.fuse.name);
+
+            // If a control file, check it supports read
+            if let FileEntryType::ControlFile(purpose) = &file.native {
+                if purpose.rw_type() != RwType::Write {
+                    purpose.read_static()
+                } else {
+                    reply.error(libc::EACCES);
+                    return;
+                }
+            } else {
+                file.cache
+                    .as_ref()
+                    .and_then(|cache| cache.get_data_complete_and_fresh(self.timers.file_cache))
+                    .map(|data| data.clone())
+                    .or_else(|| {
+                        trace!("No cache");
+                        None
+                    })
+            }
+        });
+
+        let data = if data.is_none() {
+            // We didn't have a cache we could use, so read the file in
+
+            // First kick off the read
+
+            // Start of locking section
+            locking_section!("Write", "Mount", {
+                let mut mount = self.mount.write();
+
+                match mount.read_file_sync(ino, false) {
+                    Ok(_) => (),
+                    Err(e) => {
+                        warn!("Failed to read file as requested by FUSE inode: {}", ino);
+                        reply.error(e.to_fuse_reply_error());
+                        return;
+                    }
+                };
+            });
+            // End of locking section
+
+            // Now wait for it to complete
+            match self.wait_for_file_read(ino) {
+                Ok(data) => data,
+                Err(e) => {
+                    warn!("File read as requested by FUSE failed to complete");
+                    reply.error(e.to_fuse_reply_error());
+                    return;
+                }
+            }
+        } else {
+            data.unwrap()
+        };
+
+        let offset = offset as usize;
+        let size = size as usize;
+
+        if offset >= data.len() {
+            reply.data(&[]);
             return;
         }
 
-        locking_section!("Write", "Mount", {
-            let mut mount = self.mount.write();
+        let end = std::cmp::min(offset + size, data.len());
+        reply.data(&data[offset..end]);
 
-            // Find the matching file
-            let file_entry = mount.files().iter().find(|x| x.fuse.ino == ino);
-            if let Some(file_entry) = file_entry {
-                match file_entry.native.clone() {
-                    FileEntryType::ControlFile(control_file) => {
-                        match control_file.write(
-                            &mut mount,
-                            offset,
-                            data,
-                            write_flags,
-                            flags,
-                            lock_owner,
-                        ) {
-                            Ok(size) => {
-                                reply.written(size);
-                            }
-                            Err(_) => {
-                                reply.error(libc::EROFS);
-                            }
-                        }
-                    }
-                    _ => {
-                        reply.error(libc::EROFS);
-                    }
-                }
-            }
-        });
+        return;
     }
 
-    fn open(&mut self, _req: &Request<'_>, ino: u64, flags: i32, reply: ReplyOpen) {
+    /*
+        fn write(
+            &mut self,
+            _req: &Request<'_>,
+            ino: u64,
+            _fh: u64,
+            offset: i64,
+            data: &[u8],
+            write_flags: u32,
+            flags: i32,
+            lock_owner: Option<u64>,
+            reply: ReplyWrite,
+        ) {
+            debug!("FuserMount::write");
+            if ino == FUSE_ROOT_ID {
+                reply.error(libc::EISDIR);
+                return;
+            }
+
+            locking_section!("Write", "Mount", {
+                let mut mount = self.mount.write();
+
+                // Find the matching file
+                let file_entry = mount.files().iter().find(|x| x.fuse.ino == ino);
+                if let Some(file_entry) = file_entry {
+                    match file_entry.native.clone() {
+                        FileEntryType::ControlFile(control_file) => {
+                            match control_file.write(
+                                &mut mount,
+                                offset,
+                                data,
+                                write_flags,
+                                flags,
+                                lock_owner,
+                            ) {
+                                Ok(size) => {
+                                    reply.written(size);
+                                }
+                                Err(_) => {
+                                    reply.error(libc::EROFS);
+                                }
+                            }
+                        }
+                        _ => {
+                            reply.error(libc::EROFS);
+                        }
+                    }
+                }
+            });
+        }
+    */
+
+    // Very basic open implementation
+    fn open(&mut self, _req: &Request<'_>, ino: u64, _flags: i32, reply: ReplyOpen) {
         debug!("FuserMount::open");
         if ino == FUSE_ROOT_ID {
             reply.error(libc::EISDIR);
@@ -654,38 +770,115 @@ impl Filesystem for FuserMount {
         }
 
         locking_section!("Read", "Mount", {
-            let mut mount = self.mount.write();  // Changed to mut since we need to modify files
+            let mount = self.mount.read();
 
-            // Find the matching file and get a mutable reference
-            if let Some(file_entry) = mount.files_mut().iter_mut().find(|x| x.fuse.ino == ino) {
-                match file_entry.open(flags) {
-                    Ok(_) => {
-                        reply.opened(0, 0);
-                    }
-                    Err(Error::Fs1541 { message: _, error: e }) => {
-                        reply.error(e.to_fuse_reply_error());
-                    }
-                    Err(_) => {
-                        reply.error(libc::EIO);
-                    }
+            // Find the matching file
+            let Some(file) = mount.file_by_inode(ino) else {
+                debug!("Couldn't find file {ino}");
+                reply.error(libc::ENOENT);
+                return;
+            };
+
+            match file.native {
+                FileEntryType::Directory(_) => {
+                    debug!("Tried to open directory");
+                    reply.error(libc::ENOENT);
+                    return;
                 }
+                _ => (),
             }
         });
+
+        // If we got here, say OK!
+        trace!("opened OK {ino}");
+        reply.opened(ino, 0);
+
+        return;
     }
 
+    /// Very basic release implementation
     fn release(
         &mut self,
         _req: &Request<'_>,
-        _ino: u64,
-        _fh: u64,
+        ino: u64,
+        fh: u64,
         _flags: i32,
         _lock_owner: Option<u64>,
         _flush: bool,
-        _reply: ReplyEmpty,
+        reply: ReplyEmpty,
     ) {
+        debug!("FuserMount::release");
+        if ino == FUSE_ROOT_ID {
+            reply.error(libc::EISDIR);
+            return;
+        }
 
+        locking_section!("Read", "Mount", {
+            let mount = self.mount.read();
+
+            // Find the matching file
+            let Some(file) = mount.file_by_inode(ino) else {
+                reply.error(libc::ENOENT);
+                return;
+            };
+
+            match file.native {
+                FileEntryType::Directory(_) => {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+                _ => (),
+            }
+        });
+
+        // If we got here, say OK!
+        if fh != ino {
+            warn!("File handle doesn't match inode");
+        }
+        reply.ok();
+
+        return;
     }
-    */
+
+    /// Very basic flush implementation 
+    fn flush(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        fh: u64,
+        _lock_owner: u64,
+        reply: ReplyEmpty
+    ) {
+        debug!("FuserMount::flush");
+        if ino == FUSE_ROOT_ID {
+            reply.error(libc::EISDIR);
+            return;
+        }
+
+        locking_section!("Read", "Mount", {
+            let mount = self.mount.read();
+
+            // Find the matching file
+            let Some(file) = mount.file_by_inode(ino) else {
+                reply.error(libc::ENOENT);
+                return;
+            };
+
+            match file.native {
+                FileEntryType::Directory(_) => {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+                _ => (),
+            }
+        });
+
+        // If we got here, say OK!
+        if fh != ino {
+            warn!("File handle doesn't match inode");
+        }
+        reply.ok();
+    }
 }
 
 // Non Filesystem FuserMount functions
@@ -747,6 +940,42 @@ impl FuserMount {
             // Increase the count, sleep, and around we go again
             count += 1;
             sleep(self.timers.dir_read_sleep);
+        }
+    }
+
+    fn wait_for_file_read(&mut self, inode: u64) -> Result<Vec<u8>, Error> {
+        let mut count = 0;
+        loop {
+            // Check count before doing anything else
+            if count >= self.counts.file_check {
+                warn!("Couldn't read file data in 10s");
+                break Err(Error::Fs1541 {
+                    message: "File read timed out".into(),
+                    error: Fs1541Error::Timeout("".into(), self.timers.file_read),
+                });
+            }
+
+            // Enter locking section to check file cache
+            let file_data = locking_section!("Read", "Mount", {
+                let mount = self.mount.read();
+
+                // Try to get the file from the inode
+                mount.file_by_inode(inode).and_then(|file| {
+                    file.cache
+                        .as_ref()
+                        .and_then(|cache| cache.get_data_complete_and_fresh(self.timers.file_cache))
+                        .map(Vec::clone)
+                })
+            });
+
+            // If we got fresh data, return it
+            if let Some(data) = file_data {
+                break Ok(data);
+            }
+
+            // Increase count and sleep before trying again
+            count += 1;
+            sleep(self.timers.file_read_sleep);
         }
     }
 }

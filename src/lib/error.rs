@@ -53,6 +53,10 @@ pub enum Fs1541Error {
     #[error("Timeout error: {0} Timer duration: {1:?}")]
     Timeout(String, std::time::Duration),
 
+    /// Operation cancelled
+    #[error("Operation cancelled: {0}")]
+    Cancelled(String),
+
     /// Read only error
     #[error("File {0} is read only")]
     ReadOnly(String),
@@ -100,6 +104,7 @@ impl Fs1541Error {
             Fs1541Error::AgedOut(_) => libc::ETIMEDOUT,
             Fs1541Error::Internal(_) => libc::EIO,
             Fs1541Error::Timeout(_, _) => libc::ETIMEDOUT,
+            Fs1541Error::Cancelled(_) => libc::ECANCELED,
             Fs1541Error::ReadOnly(_) => libc::EROFS,
             Fs1541Error::WriteOnly(_) => libc::EACCES,
             Fs1541Error::ReadOrWriteOnly(_) => libc::EINVAL,
