@@ -307,12 +307,12 @@ impl Daemon {
 
         match timeout(CLEANUP_OVERALL_TIMER, cleanup).await {
             Ok(_) => {
-                info!("All threads shutdown");
                 assert!(bg_proc_abort2.as_ref().map_or(true, |x| x.is_finished()));
                 assert!(ipc_server_abort2.as_ref().map_or(true, |x| x.is_finished()));
                 assert!(bg_listener_abort2
                     .as_ref()
                     .map_or(true, |x| x.is_finished()));
+                info!("Primary processing threads shutdown");
                 Ok(())
             }
             Err(_) => {

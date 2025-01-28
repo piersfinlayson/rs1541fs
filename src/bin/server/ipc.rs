@@ -20,7 +20,8 @@ use crate::mount::{validate_mount_request, validate_unmount_request};
 
 use either::{Left, Right};
 use flume::{Receiver, Sender};
-use log::{debug, error, info, trace, warn};
+#[allow(unused_imports)]
+use log::{error, warn, info, debug, trace};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use std::path::Path;
@@ -261,14 +262,14 @@ impl IpcServer {
         self.ipc_server_run.store(true, Ordering::SeqCst);
         let listener = self.setup_socket().await?;
 
-        info!("IPC server ready to accept connections on {}", SOCKET_PATH);
+        debug!("IPC server ready to accept connections on {}", SOCKET_PATH);
 
         // Create a clone of self for the spawned task
         let self_clone = self.clone();
 
         // Spawn the listener loop in its own task
         let handle = tokio::spawn(async move {
-            debug!("IPC listener ready");
+            trace!("IPC listener ready");
             // Use tokio::select! to handle both the accept() and periodic check
             loop {
                 tokio::select! {
@@ -295,7 +296,7 @@ impl IpcServer {
                                 }
                             }
                             Err(e) => {
-                                error!("Error accepting connection: {}", e);
+                                warn!("Error accepting connection: {}", e);
                                 // Small delay to prevent tight loop on persistent errors
                                 tokio::time::sleep(Duration::from_millis(BG_LIST_WAIT_TIME_MS)).await;
                             }
@@ -304,7 +305,7 @@ impl IpcServer {
                 }
             }
 
-            info!("IPC server exited");
+            info!("... IPC server exited");
             self_clone.cleanup_socket().await;
         });
 
@@ -333,7 +334,7 @@ impl IpcServer {
         trace!("Entered start_background_receiver");
         let rx = bg_rsp_rx;
 
-        info!(
+        debug!(
             "Starting bg receiver with channel capacity: {:?}",
             rx.capacity()
         );
@@ -361,7 +362,7 @@ impl IpcServer {
                                     if let Err(e) = Self::send_response(&mut stream, cli_resp).await {
                                         warn!("Failed to send response back to client {}", e);
                                     } else {
-                                        info!("Successfully sent response back to client");
+                                        trace!("Successfully sent response back to client");
                                     }
                                 } else {
                                     warn!("No stream on response - cannot send response to the client");
@@ -375,7 +376,7 @@ impl IpcServer {
                     }
                 }
             }
-            info!("IPC background response processor exited");
+            info!("... IPC background response processor exited");
         });
 
         trace!("Exiting start_background_receiver");

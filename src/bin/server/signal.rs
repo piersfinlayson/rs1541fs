@@ -40,7 +40,7 @@ impl SignalHandler {
                     return Ok(());
                 }
                 _ = sigint.recv() => {
-                    info!("SIGINT received");
+                    info!("SIGINT (Ctrl-C) received");
                     if force_quit.load(Ordering::SeqCst) {
                         error!("Second signal received - force quitting");
                         std::process::exit(1);

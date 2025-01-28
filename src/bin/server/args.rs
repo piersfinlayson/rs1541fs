@@ -1,6 +1,7 @@
 use clap::{ArgAction, Parser};
 use std::env;
 use std::sync::OnceLock;
+use log::{log, Level, log_enabled};
 
 static ARGS: OnceLock<Args> = OnceLock::new();
 
@@ -237,8 +238,68 @@ impl Args {
         let args = ARGS.get().unwrap();
         args
     }
+
 }
 
 pub fn get_args() -> &'static Args {
     ARGS.get().unwrap()
+}
+
+fn get_effective_level(module: &str) -> Level {
+    // Test each level from most verbose to least
+    let levels = [Level::Trace, Level::Debug, Level::Info, Level::Warn, Level::Error];
+    
+    for &level in &levels {
+        if log_enabled!(target: module, level) {
+            return level;
+        }
+    }
+
+    Level::Error // Everything is off, so effectively Error level
+}
+
+pub fn log_args(level: log::Level) {
+    let args = get_args();
+    log!(level, "--------- 1541fsd Arguments ----------");
+    log!(level, "Standard args.........................");
+    log!(level, "  foreground:  {}", args.foreground);
+    log!(level, "  std_logging: {}", args.std_logging);
+    log!(level, "  autounmount: {}", args.autounmount);
+    log!(level, "Cache values..........................");
+    log!(level, "  dir_cache_expiry_secs:   {}s", args.dir_cache_expiry_secs);
+    log!(level, "  file_cache_expiry_secs:  {}s", args.file_cache_expiry_secs);
+    log!(level, "Timer values..........................");
+    log!(level, "  dir_reread_timeout_secs:   {}s",
+        args.dir_reread_timeout_secs
+    );
+    log!(level, "  file_reread_timeout_secs:  {}s",
+        args.file_reread_timeout_secs
+    );
+    log!(level, "  dir_read_sleep_ms:         {}ms",
+        args.dir_read_sleep_ms
+    );
+    log!(level, "  file_read_sleep_ms:        {}ms",
+        args.file_read_sleep_ms
+    );
+    log!(level, "  bg_age_check_secs:         {}s",
+        args.bg_age_check_secs
+    );
+    log!(level, "TTL values............................");
+    log!(level, "  dir_attr_ttl_ms:     {}ms",
+        args.dir_attr_ttl_ms
+    );
+    log!(level, "  file_attr_ttl_ms:    {}ms",
+        args.file_attr_ttl_ms
+    );
+    log!(level, "  dir_lookup_ttl_ms:   {}ms",
+        args.dir_lookup_ttl_ms
+    );
+    log!(level, "  file_lookup_ttl_ms:  {}ms",
+        args.file_lookup_ttl_ms
+    );
+    log!(level, "Logging settings......................");
+    log!(level, "  fuser:    {:?}", get_effective_level("fuser"));
+    log!(level, "  xum1541:  {:?}", get_effective_level("xum1541"));
+    log!(level, "  rs1541:   {:?}", get_effective_level("rs1541"));
+    log!(level, "  1541fsd:  {:?}", get_effective_level("1541fsd"));
 }

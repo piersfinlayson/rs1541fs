@@ -40,16 +40,16 @@ impl TTLs {
         let file_lookup = Duration::from_millis(get_args().file_lookup_ttl_ms);
         let dir_attr = Duration::from_millis(get_args().dir_attr_ttl_ms);
         let file_attr = Duration::from_millis(get_args().file_attr_ttl_ms);
-        debug!(
+        trace!(
             "FuserMount::TTLs dir_lookup = {} ms",
             dir_lookup.as_millis()
         );
-        debug!(
+        trace!(
             "FuserMount::TTLs file_lookup = {} ms",
             file_lookup.as_millis()
         );
-        debug!("FuserMount::TTLs dir_attr = {} ms", dir_attr.as_millis());
-        debug!("FuserMount::TTLs file_attr = {} ms", file_attr.as_millis());
+        trace!("FuserMount::TTLs dir_attr = {} ms", dir_attr.as_millis());
+        trace!("FuserMount::TTLs file_attr = {} ms", file_attr.as_millis());
         TTLs {
             dir_lookup,
             file_lookup,
@@ -71,14 +71,14 @@ struct Counts {
 impl Counts {
     fn new(timer: &Timers) -> Self {
         let dir_check = timer.dir_read.as_millis() / timer.dir_read_sleep.as_millis();
-        debug!("FuserMount::Counts dir_check = {dir_check}");
+        trace!("FuserMount::Counts dir_check = {dir_check}");
         if dir_check > u32::MAX as u128 {
             panic!("FuserMount::Counts::dir_check is too large");
         }
         let dir_check = dir_check as u32;
 
         let file_check = timer.file_read.as_millis() / timer.file_read_sleep.as_millis();
-        debug!("FuserMount::Counts read_check = {file_check}");
+        trace!("FuserMount::Counts read_check = {file_check}");
         if file_check > u32::MAX as u128 {
             panic!("FuserMount::Counts::read_check is too large");
         }
@@ -236,7 +236,10 @@ impl Filesystem for FuserMount {
             // Now lookup the filename in the list of files, and return the
             // inode if found
             if let Some(file) = file_entries.iter().find(|f| f.fuse.name == name) {
-                trace!("File found for fuse filename {name} inode {}", file.fuse.ino);
+                trace!(
+                    "File found for fuse filename {name} inode {}",
+                    file.fuse.ino
+                );
                 file.clone()
             } else {
                 trace!("File not found for fuse filename name {name}");
@@ -840,15 +843,8 @@ impl Filesystem for FuserMount {
         return;
     }
 
-    /// Very basic flush implementation 
-    fn flush(
-        &mut self,
-        _req: &Request,
-        ino: u64,
-        fh: u64,
-        _lock_owner: u64,
-        reply: ReplyEmpty
-    ) {
+    /// Very basic flush implementation
+    fn flush(&mut self, _req: &Request, ino: u64, fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
         debug!("FuserMount::flush");
         if ino == FUSE_ROOT_ID {
             reply.error(libc::EISDIR);

@@ -668,7 +668,7 @@ impl Proc {
     }
 
     pub async fn run(&mut self) {
-        info!("Background operation processor ready");
+        debug!("Background operation processor ready");
 
         while !self.shutdown.load(Ordering::Relaxed) {
             // Runs each of these in parallel
@@ -705,7 +705,7 @@ impl Proc {
             }
         }
 
-        info!("Background operation processor exited");
+        info!("... Background operation processor exited");
         self.mount_svc.cleanup().await;
     }
 

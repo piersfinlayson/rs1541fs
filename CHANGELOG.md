@@ -9,6 +9,7 @@ All notable changes to this project will be documented in this file.
 - Removed futures from Cargo.toml as unused
 - Removed bindgen from Cargo.toml as no longer used (was required to build OpenCBM dependencies)
 - Better readme and arg handling
+- Improved logging
 
 ## [0.2.1] - 2025-01-27
 ### Added

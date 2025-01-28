@@ -313,8 +313,10 @@ impl MountService {
         });
 
         // Clean up each mount individually
+        let mut count = 0;
         for mountpoint in mountpoints {
             debug!("Unmount {}", mountpoint.to_string_lossy());
+            count += 1;
             match self.unmount(None, Some(&mountpoint), true).await {
                 Ok(_) => info!(
                     "Successfully cleaned up mount at {}",
@@ -341,6 +343,6 @@ impl MountService {
             }
         });
 
-        info!("Cleaned up mounts");
+        info!("... Cleaned up all ({}) mounts and associated threads", count);
     }
 }

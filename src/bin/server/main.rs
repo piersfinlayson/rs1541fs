@@ -9,7 +9,7 @@ mod mount;
 mod mountsvc;
 mod signal;
 
-use args::Args;
+use args::{log_args, Args};
 use daemon::Daemon;
 use fs1541::error::{Error, Fs1541Error};
 use fs1541::ipc::DAEMON_PID_FILENAME;
@@ -142,21 +142,11 @@ async fn async_main(args: &Args) -> Result<(), Error> {
     // the daemon process, not the parent process that called daemonize()
     let pid = getpid();
     init_logging(!args.std_logging, env!("CARGO_BIN_NAME").into());
-    info!("----- Starting -----");
+    log_args(log::Level::Debug);
+    info!("-------------- Starting --------------");
     if !args.foreground {
         info!("Daemonized at pid {}", pid);
     }
-
-    debug!("Args:");
-    debug!("  foreground: {}", args.foreground);
-    debug!("  std_logging: {}", args.std_logging);
-    debug!("  autounmount: {}", args.autounmount);
-    debug!("  dir_cache_expiry_secs: {}", args.dir_cache_expiry_secs);
-    debug!(
-        "  dir_reread_timeout_secs: {}",
-        args.dir_reread_timeout_secs
-    );
-    debug!("  dir_read_sleep_ms: {}", args.dir_read_sleep_ms);
 
     // Use rs1541 and open the XUM1541 device - we do this early on
     // because there's no poin continuing if we don't have an XUM1541
@@ -192,14 +182,14 @@ async fn async_main(args: &Args) -> Result<(), Error> {
         let mut guard = shared_daemon.lock().await;
         guard.start_bg_proc().await;
     });
-    debug!("Background Processor started");
+    trace!("Background Processor started");
 
     trace!("Start IPC Server");
     locking_section!("Lock", "Daemon", {
         let mut guard = shared_daemon.lock().await;
         guard.start_ipc_server(bg_rsp_rx).await?;
     });
-    debug!("IPC Server started");
+    trace!("IPC Server started");
 
     // Get the process handles - note that this _takes_ them, so nothing else
     // can also access them
@@ -217,6 +207,7 @@ async fn async_main(args: &Args) -> Result<(), Error> {
     let signal_handler = SignalHandler::new();
 
     // Main select - waiting until one of these event occurs
+    info!("All threads started - ready to handle requests");
     tokio::select! {
         result = bg_proc_handle => {
             warn!("Background processing thread has exited");
@@ -261,12 +252,12 @@ async fn async_main(args: &Args) -> Result<(), Error> {
 struct MainCleanupGuard;
 impl Drop for MainCleanupGuard {
     fn drop(&mut self) {
-        debug!("Cleaning up...");
+        trace!("Entered main cleanup guard");
         if Path::new(&get_pid_filename()).exists() {
-            info!("Removing pidfile");
+            debug!("Removing pidfile");
             let _ = fs::remove_file(get_pid_filename());
         }
-        info!("----- Exiting -----");
+        info!("-------------- Exiting ---------------");
     }
 }
 
@@ -311,11 +302,11 @@ fn main() -> ExitCode {
     // Do everything else in async_main
     match runtime.block_on(async_main(args)) {
         Ok(()) => {
-            info!("{PKG_BIN_NAME} exiting normally");
+            debug!("Exiting normally");
             ExitCode::SUCCESS
         }
         Err(e) => {
-            let msg = format!("{PKG_BIN_NAME} exiting with an error");
+            let msg = format!("Exiting with an error");
             error!("{msg}: {e}");
             ExitCode::FAILURE
         }
