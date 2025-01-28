@@ -678,7 +678,7 @@ impl Mount {
             })
     }
 
-    pub fn should_refresh_dir(&self, drive_num: u8) -> bool {
+    pub fn should_refresh_dir(&self, drive_num: u8, cache_duration: Duration) -> bool {
         if drive_num >= self.num_drives() {
             warn!(
                 "Drive number out of range {} vs {}",
@@ -694,13 +694,12 @@ impl Mount {
             // if it's been more than DIR_CACHE_EXPIRY_SECS, or we have never
             // read the disk, re-read
             let now = SystemTime::now();
-            let refresh_duration = Duration::from_secs(get_args().dir_cache_expiry_secs);
             match now.duration_since(
                 self.disk_info[drive_num as usize]
                     .disk_read_time
                     .unwrap_or(now),
             ) {
-                Ok(duration) => duration >= refresh_duration,
+                Ok(duration) => duration >= cache_duration,
                 Err(_) => true,
             }
         }

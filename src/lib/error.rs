@@ -82,6 +82,15 @@ pub enum Fs1541Error {
     NoEntry(String),
 }
 
+impl Error {
+    pub fn to_fuse_reply_error(&self) -> i32 {
+        match self {
+            Error::Fs1541 { error, .. } => error.to_fuse_reply_error(),
+            _ => libc::EIO,
+        }
+    }
+}
+
 impl Fs1541Error {
     pub fn to_fuse_reply_error(&self) -> i32 {
         match self {

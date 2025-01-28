@@ -980,6 +980,12 @@ impl FileEntry {
     }
 }
 
+impl From<FileEntry> for FileAttr {
+    fn from(file: FileEntry) -> FileAttr {
+        FileAttr::from(&file)
+    }
+}
+
 impl From<&FileEntry> for FileAttr {
     fn from(file: &FileEntry) -> FileAttr {
         FileAttr {

@@ -136,25 +136,47 @@ pub struct Args {
 
     #[arg(
         long,
-        env = "DIR_ENTRY_TTL_MS",
-        default_value = "60000",
-        help_heading = "Timers",
+        env = "DIR_ATTR_TTL_MS",
+        default_value = "5000",
+        help_heading = "TTLs",
         next_line_help = true,
-        help = "How long the kernel should cache directory entries",
-        long_help = "Each directory entry will be provided to the kernel with this TTL\nset.  The kernel may choose to cache the provided information for\nthis long beween performing re-reads.  Note that how often the disk\ndirectory listing is re-read is set by DIR_CACHE_EXPIRY_SECS"
+        help = "How long the kernel should directory attributes",
+        long_help = "How long the kernel should directory attributes for. This\nincludes the contents, permissions, and extended attributes.\nIt is strongly recommended that this is below\nDIR_CACHE_EXPIRY_SECS."
     )]
-    pub dir_entry_ttls_ms: u64,
+    pub dir_attr_ttl_ms: u64,
 
     #[arg(
         long,
-        env = "FILE_ENTRY_TTL_MS",
+        env = "FILE_ATTR_TTL_MS",
         default_value = "5000",
-        help_heading = "Timers",
+        help_heading = "TTLs",
         next_line_help = true,
-        help = "How long the kernel should cache file entries",
-        long_help = "Each file entry will be provided to the kernel with this TTL set.\nThe kernel may choose to cache the provided information for this\nlong before performing re-reads.  Note that this also controls how\nlong the kernel will cache extended attributes (xattrs) for.\nThese may be updated by fs1541 frequently, so you may prefer a\nlow value here."
+        help = "How long the kernel should cache file entry inodes",
+        long_help = "How long the kernel should cache file attributes.  This\nincludes the contents, permissions and extended attributes.\nIt is strongly recommended that this is below DIR_CACHE_EXPIRY_SECS."
     )]
-    pub file_entry_ttls_ms: u64,
+    pub file_attr_ttl_ms: u64,
+
+    #[arg(
+        long,
+        env = "DIR_LOOKUP_TTL_MS",
+        default_value = "5000",
+        help_heading = "TTLs",
+        next_line_help = true,
+        help = "How long the kernel should cache directory entry inodes",
+        long_help = "How long the kernel should cache directory entry inodes.  This\nmeans the directory to inode mapping.  It is strongly recommended\nthat this is below DIR_CACHE_EXPIRY_SECS."
+    )]
+    pub dir_lookup_ttl_ms: u64,
+
+    #[arg(
+        long,
+        env = "FILE_LOOKUP_TTL_MS",
+        default_value = "5000",
+        help_heading = "TTLs",
+        next_line_help = true,
+        help = "How long the kernel should cache file entry inodes",
+        long_help = "How long the kernel should cache file entry inodes.  This\nmeans the file to inode mapping.  It is strongly recommended\nthat this is below DIR_CACHE_EXPIRY_SECS."
+    )]
+    pub file_lookup_ttl_ms: u64,
 
     /// Disable fuser auto-unmount option (mounts may remain on exit)
     #[arg(
