@@ -1,6 +1,3 @@
-#![allow(dead_code)]
-
-use crate::mount::Mount;
 use crate::{Error, Fs1541Error};
 use rs1541::{CbmDirListing, CbmDiskHeader, CbmFileEntry, CbmFileType, CbmStatus, DosVersion};
 
@@ -13,6 +10,7 @@ use std::time::{Duration, SystemTime};
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum BufferType {
     Read,
@@ -26,6 +24,7 @@ pub struct Buffer {
     complete: bool,
 }
 
+#[allow(dead_code)]
 impl Buffer {
     pub fn new_read() -> Self {
         Buffer {
@@ -322,6 +321,7 @@ impl DriveXattr {
 }
 
 impl DiskXattr {
+    #[allow(dead_code)]
     pub fn new(
         header_name: &str,
         header_id: &str,
@@ -618,6 +618,7 @@ impl ControlFile {
         &self.purpose
     }
 
+    /*
     pub fn write(
         &self,
         mount: &mut Mount,
@@ -659,6 +660,7 @@ impl ControlFile {
             }
         }
     }
+    */
 }
 
 #[derive(Debug, Clone)]

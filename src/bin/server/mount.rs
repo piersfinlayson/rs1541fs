@@ -3,6 +3,7 @@ use fs1541::validate::{validate_mountpoint, ValidationType};
 use rs1541::{validate_device, CbmFileEntry, DeviceValidation};
 use rs1541::{
     Cbm, CbmDeviceInfo, CbmDirListing, CbmDriveUnit, CbmErrorNumber, CbmErrorNumberOk, CbmStatus,
+    Device,
 };
 
 use crate::args::get_args;
@@ -45,20 +46,23 @@ pub struct DirectoryCache {
 /// representation in the Linux filesystem.
 #[derive(Debug)]
 #[allow(dead_code)]
-pub struct Mount {
+pub struct Mount<D: Device>
+where
+    D: Send + Sync + 'static,
+{
     device_num: u8,
     mountpoint: PathBuf,
     _dummy_formats: bool,
-    cbm: Arc<Mutex<Cbm>>,
-    drive_mgr: Arc<Mutex<DriveManager>>,
-    drive_unit: Arc<RwLock<CbmDriveUnit>>,
+    cbm: Arc<Mutex<Cbm<D>>>,
+    drive_mgr: Arc<Mutex<DriveManager<D>>>,
+    drive_unit: Arc<RwLock<CbmDriveUnit<D>>>,
     bg_proc_tx: Arc<Sender<Operation>>,
     bg_rsp_tx: Arc<Sender<OpResponse>>,
     bg_rsp_rx: Option<Receiver<OpResponse>>,
     directory_cache: Arc<RwLock<DirectoryCache>>,
     fuser: Option<Arc<Mutex<BackgroundSession>>>,
     next_inode: u64,
-    shared_self: Option<Arc<parking_lot::RwLock<Mount>>>,
+    shared_self: Option<Arc<parking_lot::RwLock<Mount<D>>>>,
     bg_rsp_handle: Option<JoinHandle<()>>,
     dir_outstanding: bool,
     drive_info: Option<CbmDeviceInfo>,
@@ -66,7 +70,10 @@ pub struct Mount {
     disk_info: Vec<DiskInfo>,
 }
 
-impl fmt::Display for Mount {
+impl<D: Device> fmt::Display for Mount<D>
+where
+    D: Send + Sync + 'static,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -77,7 +84,11 @@ impl fmt::Display for Mount {
     }
 }
 
-impl Mount {
+#[allow(dead_code)]
+impl<D: Device> Mount<D>
+where
+    D: Send + Sync + 'static,
+{
     /// While this function does cause the DriveUnit to be created within
     /// DriveManager, it will not insert Mount into mountpaths.  The caller
     /// must do that.  DriveManager will, as part of creating the DriveUnit
@@ -88,9 +99,9 @@ impl Mount {
         device_num: u8,
         mountpoint: P,
         dummy_formats: bool,
-        cbm: Arc<Mutex<Cbm>>,
-        drive_mgr: Arc<Mutex<DriveManager>>,
-        drive_unit: Arc<RwLock<CbmDriveUnit>>,
+        cbm: Arc<Mutex<Cbm<D>>>,
+        drive_mgr: Arc<Mutex<DriveManager<D>>>,
+        drive_unit: Arc<RwLock<CbmDriveUnit<D>>>,
         bg_proc_tx: Arc<Sender<Operation>>,
     ) -> Result<Self, Error> {
         // Create a flume channel for receiving reponses from Background
@@ -435,7 +446,7 @@ impl Mount {
             // reply back to us when done)
             let op = Operation::new(
                 OpType::ReadDirectory {
-                    drive_unit: self.drive_unit.clone(),
+                    device: self.device_num,
                 },
                 self.bg_rsp_tx.clone(),
                 None,
@@ -443,7 +454,7 @@ impl Mount {
             match self.bg_proc_tx.send_async(op).await {
                 Ok(_) => {
                     debug!("Sent read directory request to BG processor");
-                    self.dir_outstanding = true;
+                    self.set_dir_outstanding(true);
                 }
                 Err(e) => {
                     warn!(
@@ -464,7 +475,7 @@ impl Mount {
             // Build the operation
             let op = Operation::new(
                 OpType::ReadDirectory {
-                    drive_unit: self.drive_unit.clone(),
+                    device: self.device_num,
                 },
                 self.bg_rsp_tx.clone(),
                 None,
@@ -472,7 +483,7 @@ impl Mount {
 
             // Send it
             send_sync_to_bg_proc(self.bg_proc_tx.clone(), op)
-                .inspect(|_| self.dir_outstanding = true)
+                .inspect(|_| self.set_dir_outstanding(true))
         } else {
             debug!("Not sending dir request, as we have one oustanding");
             Ok(())
@@ -481,7 +492,7 @@ impl Mount {
 
     pub fn set_shared_self(
         &mut self,
-        shared_self: Arc<parking_lot::RwLock<Mount>>,
+        shared_self: Arc<parking_lot::RwLock<Mount<D>>>,
     ) -> Result<(), Error> {
         if self.shared_self.is_some() {
             Err(Error::Fs1541 {
@@ -538,7 +549,7 @@ impl Mount {
         Ok(())
     }
 
-    fn process_bg_response(shared_self: Arc<parking_lot::RwLock<Mount>>, response: OpResponse) {
+    fn process_bg_response(shared_self: Arc<parking_lot::RwLock<Mount<D>>>, response: OpResponse) {
         let rsp = if let Err(e) = response.rsp {
             warn!("Received BG processor Error response: {}", e);
             return;
@@ -553,7 +564,7 @@ impl Mount {
                     if !guard.dir_outstanding {
                         warn!("Received ReadDirectory listing when one wasn't outstanding");
                     }
-                    guard.dir_outstanding = false;
+                    guard.set_dir_outstanding(false);
                     guard.process_directory_listings(listings);
                     guard.update_last_status(&status);
                 });
@@ -612,7 +623,7 @@ impl Mount {
     }
 
     pub fn handle_bg_responses(
-        shared_self: Arc<parking_lot::RwLock<Mount>>,
+        shared_self: Arc<parking_lot::RwLock<Mount<D>>>,
         rx: Receiver<OpResponse>,
         mountpoint: PathBuf,
     ) {
@@ -791,7 +802,6 @@ impl Mount {
         let device_num = self.device_num;
         let bg_rsp_tx = self.bg_rsp_tx.clone();
         let bg_proc_tx = self.bg_proc_tx.clone();
-        let drive_unit = self.drive_unit.clone();
 
         let _drive = self.get_drive_num_from_inode(inode).unwrap_or_else(|| {
             warn!("Failed to get drive number from file, using 0");
@@ -862,14 +872,12 @@ impl Mount {
         // Build the operation
         let op_type = if !cache {
             OpType::ReadFile {
-                drive_unit,
                 device: device_num,
                 path: filename,
                 inode,
             }
         } else {
             OpType::ReadFileCache {
-                drive_unit,
                 device: device_num,
                 path: filename,
                 inode,

@@ -203,7 +203,7 @@ impl Args {
 mod tests {
     use crate::args::{Args, ClientOperation};
     use fs1541::error::Error;
-    use rs1541::{DEFAULT_DEVICE_NUM, MAX_DEVICE_NUM, MIN_DEVICE_NUM};
+    use rs1541::{DEFAULT_DEVICE_NUM, DEVICE_MAX_NUM, DEVICE_MIN_NUM};
     use tempfile::TempDir;
 
     // Helper function to create a temporary directory for mount point tests
@@ -272,7 +272,7 @@ mod tests {
             let temp_dir = setup_test_dir();
             let mount_path = temp_dir.path().to_str().unwrap().to_string();
 
-            for device in MIN_DEVICE_NUM..=MAX_DEVICE_NUM {
+            for device in DEVICE_MIN_NUM..=DEVICE_MAX_NUM {
                 let args = Args {
                     operation: ClientOperation::Mount {
                         device,
@@ -303,7 +303,7 @@ mod tests {
             // Test below minimum
             let args = Args {
                 operation: ClientOperation::Mount {
-                    device: MIN_DEVICE_NUM - 1,
+                    device: DEVICE_MIN_NUM - 1,
                     dummy_formats: false,
                     mountpoint: mount_path.clone(),
                     path: None,
@@ -314,7 +314,7 @@ mod tests {
             // Test above maximum
             let args = Args {
                 operation: ClientOperation::Mount {
-                    device: MAX_DEVICE_NUM + 1,
+                    device: DEVICE_MAX_NUM + 1,
                     dummy_formats: false,
                     mountpoint: mount_path,
                     path: None,
@@ -336,7 +336,7 @@ mod tests {
             // Test invalid device number
             let args = Args {
                 operation: ClientOperation::Identify {
-                    device: MAX_DEVICE_NUM + 1,
+                    device: DEVICE_MAX_NUM + 1,
                 },
             };
             assert!(validate_for_test(args).is_err());
@@ -453,7 +453,7 @@ mod tests {
             // Test with invalid device number
             let args = Args {
                 operation: ClientOperation::Unmount {
-                    device: Some(MAX_DEVICE_NUM + 1),
+                    device: Some(DEVICE_MAX_NUM + 1),
                     mountpoint: None,
                     path: None,
                 },

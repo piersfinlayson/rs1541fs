@@ -1,7 +1,7 @@
 use crate::locking_section;
 use fs1541::error::{Error, Fs1541Error};
-use rs1541::{Cbm, CbmDeviceInfo, CbmDriveUnit, CbmErrorNumber, CbmStatus};
-use rs1541::{MAX_DEVICE_NUM, MIN_DEVICE_NUM};
+use rs1541::{Cbm, CbmDeviceInfo, CbmDriveUnit, CbmErrorNumber, CbmStatus, Device};
+use rs1541::{DEVICE_MAX_NUM, DEVICE_MIN_NUM};
 
 use log::{debug, error, info, trace, warn};
 use std::collections::HashMap;
@@ -14,13 +14,13 @@ use tokio::sync::{Mutex, RwLock};
 /// guaranteed to be unique per drive.  They are protected by a RwLock as
 /// there may be reads to identify the drive, or whether its busy.
 #[derive(Debug)]
-pub struct DriveManager {
-    cbm: Arc<Mutex<Cbm>>,
-    drives: RwLock<HashMap<u8, Arc<RwLock<CbmDriveUnit>>>>,
+pub struct DriveManager<D: Device> {
+    cbm: Arc<Mutex<Cbm<D>>>,
+    drives: RwLock<HashMap<u8, Arc<RwLock<CbmDriveUnit<D>>>>>,
 }
 
-impl DriveManager {
-    pub fn new(cbm: Arc<Mutex<Cbm>>) -> Self {
+impl<D: Device> DriveManager<D> {
+    pub fn new(cbm: Arc<Mutex<Cbm<D>>>) -> Self {
         debug!("Initializing new DriveManager");
         Self {
             cbm,
@@ -29,20 +29,23 @@ impl DriveManager {
     }
 
     /// Add a new drive to the manager
-    pub async fn add_drive(&self, device_number: u8) -> Result<Arc<RwLock<CbmDriveUnit>>, Error> {
+    pub async fn add_drive(
+        &self,
+        device_number: u8,
+    ) -> Result<Arc<RwLock<CbmDriveUnit<D>>>, Error> {
         info!("Adding drive with device number {}", device_number);
 
         // Validate device number
-        if (device_number < MIN_DEVICE_NUM) || (device_number > MAX_DEVICE_NUM) {
+        if (device_number < DEVICE_MIN_NUM) || (device_number > DEVICE_MAX_NUM) {
             error!(
                 "Invalid device number {} (must be {}-{})",
-                device_number, MIN_DEVICE_NUM, MAX_DEVICE_NUM
+                device_number, DEVICE_MIN_NUM, DEVICE_MAX_NUM
             );
             return Err(Error::Fs1541 {
                 message: format!("Invalid device number {}", device_number),
                 error: Fs1541Error::Validation(format!(
                     "Device number must be {}-{}",
-                    MIN_DEVICE_NUM, MAX_DEVICE_NUM
+                    DEVICE_MIN_NUM, DEVICE_MAX_NUM
                 )),
             });
         }
@@ -117,7 +120,10 @@ impl DriveManager {
 
     /// Get a reference to a drive
     #[allow(dead_code)]
-    pub async fn get_drive(&self, device_number: u8) -> Result<Arc<RwLock<CbmDriveUnit>>, Error> {
+    pub async fn get_drive(
+        &self,
+        device_number: u8,
+    ) -> Result<Arc<RwLock<CbmDriveUnit<D>>>, Error> {
         trace!("Getting reference to drive {}", device_number);
         locking_section!("Read", "Drives", {
             match self.drives.read().await.get(&device_number) {

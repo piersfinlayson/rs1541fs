@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 - Removed bindgen from Cargo.toml as no longer used (was required to build OpenCBM dependencies)
 - Better readme and arg handling
 - Improved logging
+- Moved to rs1541 0.3.0 to support xum1541 0.3.0 traits
 
 ## [0.2.1] - 2025-01-27
 ### Added

@@ -5,7 +5,7 @@ use crate::locking_section;
 use crate::mount::Mount;
 
 use fs1541::error::{Error, Fs1541Error};
-use rs1541::Cbm;
+use rs1541::{Cbm, Device};
 
 use flume::Sender;
 use log::{debug, info, trace, warn};
@@ -19,17 +19,23 @@ use tokio::sync::{Mutex, RwLock};
 /// locking DriveManager, and hence we must not call into these Mount
 /// operations with DriveManager locked (so can't do it from DriveManager)
 #[derive(Debug)]
-pub struct MountService {
-    cbm: Arc<Mutex<Cbm>>,
-    drive_mgr: Arc<Mutex<DriveManager>>,
-    mountpoints: Arc<RwLock<HashMap<PathBuf, Arc<parking_lot::RwLock<Mount>>>>>,
+pub struct MountService<D: Device>
+where
+    D: Send + Sync + 'static,
+{
+    cbm: Arc<Mutex<Cbm<D>>>,
+    drive_mgr: Arc<Mutex<DriveManager<D>>>,
+    mountpoints: Arc<RwLock<HashMap<PathBuf, Arc<parking_lot::RwLock<Mount<D>>>>>>,
 }
 
-impl MountService {
+impl<D: Device> MountService<D>
+where
+    D: Send + Sync + 'static,
+{
     pub fn new(
-        cbm: Arc<Mutex<Cbm>>,
-        drive_mgr: Arc<Mutex<DriveManager>>,
-        mountpoints: Arc<RwLock<HashMap<PathBuf, Arc<parking_lot::RwLock<Mount>>>>>,
+        cbm: Arc<Mutex<Cbm<D>>>,
+        drive_mgr: Arc<Mutex<DriveManager<D>>>,
+        mountpoints: Arc<RwLock<HashMap<PathBuf, Arc<parking_lot::RwLock<Mount<D>>>>>>,
     ) -> Self {
         MountService {
             cbm,
@@ -129,7 +135,7 @@ impl MountService {
 
     async fn add_mount_to_mountpoints<P: AsRef<Path>>(
         &self,
-        mount: Arc<parking_lot::RwLock<Mount>>,
+        mount: Arc<parking_lot::RwLock<Mount<D>>>,
         mountpoint: P,
         device_number: u8,
     ) -> Result<(), Error> {
@@ -165,7 +171,7 @@ impl MountService {
     pub async fn get_mount<P: AsRef<Path>>(
         &self,
         mountpoint: P,
-    ) -> Result<Arc<parking_lot::RwLock<Mount>>, Error> {
+    ) -> Result<Arc<parking_lot::RwLock<Mount<D>>>, Error> {
         trace!("Getting mount {}", mountpoint.as_ref().to_string_lossy());
         locking_section!("Lock", "Mountpoints", {
             let mountpoints = self.mountpoints.read().await;
@@ -185,7 +191,7 @@ impl MountService {
     pub async fn get_mount_from_device_num(
         &self,
         device_number: u8,
-    ) -> Result<Arc<parking_lot::RwLock<Mount>>, Error> {
+    ) -> Result<Arc<parking_lot::RwLock<Mount<D>>>, Error> {
         let mount = locking_section!("Lock", "Mountpoints", {
             let mps = self.mountpoints.read().await;
             for (_path, mps_mount) in mps.iter() {
@@ -343,6 +349,9 @@ impl MountService {
             }
         });
 
-        info!("... Cleaned up all ({}) mounts and associated threads", count);
+        info!(
+            "... Cleaned up all ({}) mounts and associated threads",
+            count
+        );
     }
 }

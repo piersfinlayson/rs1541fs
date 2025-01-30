@@ -1,4 +1,4 @@
-use rs1541::Cbm;
+use rs1541::{Cbm, Device};
 
 use crate::bg::{OpResponse, Operation, Proc, MAX_BG_CHANNELS};
 use crate::drivemgr::DriveManager;
@@ -36,15 +36,18 @@ pub const CLEANUP_OVERALL_TIMER: Duration = Duration::from_secs(5);
 ///   let daemon = Arc::new(Mutex::new(Daemon(cbm)));
 #[derive(Debug)]
 #[allow(dead_code)]
-pub struct Daemon {
+pub struct Daemon<D: Device>
+where
+    D: Send + Sync + 'static,
+{
     // Process ID of this process - retrieve after daemonize (if present)
     pid: Pid,
 
     // Muted cbm object - which will be shared widely between threads
-    cbm: Arc<Mutex<Cbm>>,
+    cbm: Arc<Mutex<Cbm<D>>>,
 
     // DriveManager object to handle drives
-    drive_mgr: Arc<Mutex<DriveManager>>,
+    drive_mgr: Arc<Mutex<DriveManager<D>>>,
 
     // Mountpoints HashMap.  This is needed by DriveManager (and hence
     // MountService as DriveManager's creator) to check for the existence of
@@ -52,7 +55,7 @@ pub struct Daemon {
     // Note that Mount must be protected by a parking_lot RwLock not a tokio
     // one because the fuser thread has to be able to access it, from without
     // the tokio context
-    mountpoints: Arc<RwLock<HashMap<PathBuf, Arc<parking_lot::RwLock<Mount>>>>>,
+    mountpoints: Arc<RwLock<HashMap<PathBuf, Arc<parking_lot::RwLock<Mount<D>>>>>>,
 
     // Main tokio runtime
     runtime: Option<Arc<Mutex<Runtime>>>,
@@ -70,7 +73,7 @@ pub struct Daemon {
     ipc_server_handle: Option<JoinHandle<()>>,
 
     // Background Processor
-    bg_proc: Option<Arc<Mutex<Proc>>>,
+    bg_proc: Option<Arc<Mutex<Proc<D>>>>,
     bg_proc_handle: Option<JoinHandle<()>>,
 
     // Background response handler
@@ -85,8 +88,11 @@ pub struct Daemon {
     bg_listener_abort: Option<AbortHandle>,
 }
 
-impl Daemon {
-    pub fn new(pid: Pid, cbm: Arc<Mutex<Cbm>>) -> Result<Self, Error> {
+impl<D: Device> Daemon<D>
+where
+    D: Send + Sync + 'static,
+{
+    pub fn new(pid: Pid, cbm: Arc<Mutex<Cbm<D>>>) -> Result<Self, Error> {
         // Create channels - to send to the BackgroundProcess and for IpcServer
         // to receive back from it
         let (bg_proc_tx, bg_proc_rx) = flume::bounded(MAX_BG_CHANNELS);
@@ -201,19 +207,10 @@ impl Daemon {
         let bg_proc = self.bg_proc.clone().unwrap();
         let bg_proc_handle = tokio::spawn(async move {
             let mut bg_proc = bg_proc.lock().await;
-            // Create a new scope to ensure the lock is released
-            {
-                bg_proc.run().await;
-            }
+            // TO DO remove this comment - the line below use to be in its
+            // own scope {}
+            bg_proc.run().await;
         });
-        /*
-        let bg_proc_handle = tokio::spawn(async move {
-            locking_section!("Lock", "BG Processor", {
-                let mut bg_proc = bg_proc.lock().await;
-                bg_proc.run().await;
-            });
-        });
-        */
         self.bg_proc_abort = Some(bg_proc_handle.abort_handle());
         self.bg_proc_handle = Some(bg_proc_handle);
     }

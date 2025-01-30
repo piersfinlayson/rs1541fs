@@ -6,7 +6,7 @@ use crate::mountsvc::MountService;
 use fs1541::error::{Error, Fs1541Error};
 /// Background processing - provides a single worker thread which handles IPC
 /// and background tasks on behalf of Mounts
-use rs1541::{Cbm, CbmDeviceInfo, CbmDirListing, CbmDriveUnit, CbmStatus, CbmString};
+use rs1541::{Cbm, CbmDeviceInfo, CbmDirListing, CbmStatus, CbmString, Device};
 
 use flume::{Receiver, Sender};
 use log::{debug, error, info, trace, warn};
@@ -43,16 +43,14 @@ pub enum OpType {
 
     /// FUSE operations that need background processing
     ReadDirectory {
-        drive_unit: Arc<RwLock<CbmDriveUnit>>,
+        device: u8,
     },
     ReadFile {
-        drive_unit: Arc<RwLock<CbmDriveUnit>>,
         device: u8,
         path: String,
         inode: u64,
     },
     WriteFile {
-        drive_unit: Arc<RwLock<CbmDriveUnit>>,
         device: u8,
         path: String,
         data: Vec<u8>,
@@ -72,7 +70,6 @@ pub enum OpType {
 
     /// Read a file for caching purposes (will be given lower priority)
     ReadFileCache {
-        drive_unit: Arc<RwLock<CbmDriveUnit>>,
         device: u8,
         path: String,
         inode: u64,
@@ -238,6 +235,7 @@ impl std::fmt::Display for OpResponse {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum OpResponseType {
     BusReset(),
@@ -574,26 +572,32 @@ impl OperationQueues {
 /// Processes background operations in priority order
 #[derive(Debug)]
 #[allow(dead_code)]
-pub struct Proc {
+pub struct Proc<D: Device>
+where
+    D: Send + Sync + 'static,
+{
     queues: OperationQueues,
     operation_receiver: Receiver<Operation>,
     operation_sender: Arc<Sender<Operation>>,
     last_cleanup: Instant,
     shutdown: Arc<AtomicBool>,
-    cbm: Arc<Mutex<Cbm>>,
-    drive_mgr: Arc<Mutex<DriveManager>>,
-    mount_svc: MountService,
+    cbm: Arc<Mutex<Cbm<D>>>,
+    drive_mgr: Arc<Mutex<DriveManager<D>>>,
+    mount_svc: MountService<D>,
     age_check_period: Duration,
 }
 
-impl Proc {
+impl<D: Device> Proc<D>
+where
+    D: Send + Sync + 'static,
+{
     pub fn new(
         operation_receiver: Receiver<Operation>,
         operation_sender: Arc<Sender<Operation>>,
         shutdown: Arc<AtomicBool>,
-        cbm: Arc<Mutex<Cbm>>,
-        drive_mgr: Arc<Mutex<DriveManager>>,
-        mountpoints: Arc<RwLock<HashMap<PathBuf, Arc<parking_lot::RwLock<Mount>>>>>,
+        cbm: Arc<Mutex<Cbm<D>>>,
+        drive_mgr: Arc<Mutex<DriveManager<D>>>,
+        mountpoints: Arc<RwLock<HashMap<PathBuf, Arc<parking_lot::RwLock<Mount<D>>>>>>,
     ) -> Self {
         let mount_svc = MountService::new(cbm.clone(), drive_mgr.clone(), mountpoints);
         Self {
@@ -770,9 +774,14 @@ impl Proc {
                 })
             }
 
-            OpType::ReadDirectory { drive_unit } => {
+            OpType::ReadDirectory { device } => {
+                let drive_unit = locking_section!("Lock", "Drive Manager", {
+                    self.drive_mgr.lock().await.get_drive(device).await?
+                });
+
                 locking_section!("Lock", "Cbm", {
                     let mut cbm = self.cbm.lock().await;
+
                     locking_section!("Read", "Drive Unit", {
                         let drive_unit = drive_unit.read().await;
                         drive_unit
@@ -793,13 +802,16 @@ impl Proc {
             }
 
             OpType::ReadFile {
-                drive_unit,
                 device,
                 path,
                 inode,
             } => {
                 debug!("Read file {device} {path}");
                 let filename = CbmString::from_ascii_bytes(path.as_bytes());
+
+                let drive_unit = locking_section!("Lock", "Drive Manager", {
+                    self.drive_mgr.lock().await.get_drive(device).await?
+                });
 
                 locking_section!("Lock", "Cbm", {
                     let mut cbm = self.cbm.lock().await;

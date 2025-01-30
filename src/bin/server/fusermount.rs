@@ -3,6 +3,7 @@ use crate::file::{FileEntry, FileEntryType, RwType, XattrOps};
 use crate::locking_section;
 use crate::mount::Mount;
 use crate::{Error, Fs1541Error};
+use rs1541::Device;
 
 use either::Either::{self, Right};
 use fuser::{
@@ -128,11 +129,14 @@ impl Timers {
     }
 }
 
-pub struct FuserMount {
+pub struct FuserMount<D: Device>
+where
+    D: Send + Sync + 'static,
+{
     /// A RwLock to the Mount object.  Care must be taken to only hold the
     /// lock briefly, as otherwise we could block other operations, such as
     /// unmounts.
-    mount: Arc<parking_lot::RwLock<Mount>>,
+    mount: Arc<parking_lot::RwLock<Mount<D>>>,
 
     /// Timers for the filesystem
     timers: Timers,
@@ -144,8 +148,11 @@ pub struct FuserMount {
     ttls: TTLs,
 }
 
-impl FuserMount {
-    pub fn new(mount: Arc<parking_lot::RwLock<Mount>>) -> Self {
+impl<D: Device> FuserMount<D>
+where
+    D: Send + Sync + 'static,
+{
+    pub fn new(mount: Arc<parking_lot::RwLock<Mount<D>>>) -> Self {
         trace!("FuserMount::new");
         let timers = Timers::new();
         let counts = Counts::new(&timers);
@@ -159,7 +166,10 @@ impl FuserMount {
     }
 }
 
-impl Filesystem for FuserMount {
+impl<D: Device> Filesystem for FuserMount<D>
+where
+    D: Send + Sync + 'static,
+{
     /// Used by FUSE to find the inode for a filename.  This is called
     /// when the kernel wants to find the inode for a file, and it's
     /// not in the cache.  This is the first call made by the kernel
@@ -878,7 +888,10 @@ impl Filesystem for FuserMount {
 }
 
 // Non Filesystem FuserMount functions
-impl FuserMount {
+impl<D: Device> FuserMount<D>
+where
+    D: Send + Sync + 'static,
+{
     /// Called after mount.do_dir_sync() to wait for the directory re-read
     /// to complete.
     ///

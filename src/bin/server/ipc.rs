@@ -21,7 +21,7 @@ use crate::mount::{validate_mount_request, validate_unmount_request};
 use either::{Left, Right};
 use flume::{Receiver, Sender};
 #[allow(unused_imports)]
-use log::{error, warn, info, debug, trace};
+use log::{debug, error, info, trace, warn};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use std::path::Path;

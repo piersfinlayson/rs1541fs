@@ -20,7 +20,7 @@ name = "1541fs"
 path = "src/bin/client/main.rs"
 
 [dependencies]
-rs1541 = { version = "0.2.1", path = "../rs1541" }
+rs1541 = { version = "0.3.0", path = "../rs1541" }
 fuser = "0.15"
 clap = { version = "4.5", features = ["derive", "env"] }
 env_logger = "0.11"

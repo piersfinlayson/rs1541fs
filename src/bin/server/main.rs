@@ -150,7 +150,7 @@ async fn async_main(args: &Args) -> Result<(), Error> {
 
     // Use rs1541 and open the XUM1541 device - we do this early on
     // because there's no poin continuing if we don't have an XUM1541
-    let cbm = Cbm::new().map_err(|e| Error::Rs1541 {
+    let cbm = Cbm::new_usb(None).map_err(|e| Error::Rs1541 {
         message: "Failed to initialize USB device".into(),
         error: e,
     })?;
