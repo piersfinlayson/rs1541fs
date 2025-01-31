@@ -1,7 +1,7 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [0.2.2] - 2025-??-??
+## [0.3.0] - 2025-??-??
 ### Added
 - install.sh script and udev rules file for xum1541
 
