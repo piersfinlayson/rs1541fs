@@ -15,6 +15,7 @@ use fs1541::error::{Error, Fs1541Error};
 use fs1541::ipc::DAEMON_PID_FILENAME;
 use fs1541::logging::init_logging;
 use rs1541::Cbm;
+use rs1541::{DEFAULT_REMOTE_ADDR, DEFAULT_REMOTE_PORT};
 
 use daemonize::Daemonize;
 #[allow(unused_imports)]
@@ -22,9 +23,11 @@ use log::{debug, error, info, trace, warn};
 use nix::unistd::getpid;
 use signal::SignalHandler;
 use std::fs;
+use std::net::SocketAddr;
 use std::panic;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -148,12 +151,32 @@ async fn async_main(args: &Args) -> Result<(), Error> {
         info!("Daemonized at pid {}", pid);
     }
 
-    // Use rs1541 and open the XUM1541 device - we do this early on
+    // Use rs1541 to open the XUM1541 device - we do this early on
     // because there's no poin continuing if we don't have an XUM1541
-    let cbm = Cbm::new_usb(None).map_err(|e| Error::Rs1541 {
-        message: "Failed to initialize USB device".into(),
+    let remote = match args.network {
+        false => None,
+        true => {
+            let address_str = format!(
+                "{}:{}",
+                args.remote_addr
+                    .clone()
+                    .unwrap_or(DEFAULT_REMOTE_ADDR.to_string()),
+                args.remote_port.unwrap_or(DEFAULT_REMOTE_PORT)
+            );
+            debug!("Remote xum1541 address: {}", address_str);
+            Some(
+                SocketAddr::from_str(&address_str).map_err(|e| Error::Fs1541 {
+                    message: "Failed to parse remote address {address_str}".into(),
+                    error: Fs1541Error::Validation(e.to_string()),
+                })?,
+            )
+        }
+    };
+    let cbm = Cbm::new(args.serial, remote).map_err(|e| Error::Rs1541 {
+        message: "Failed to initialize USB xum1541".into(),
         error: e,
     })?;
+
     let shared_cbm = Arc::new(Mutex::new(cbm));
 
     // Now create the daemon object
@@ -308,6 +331,9 @@ fn main() -> ExitCode {
         Err(e) => {
             let msg = format!("Exiting with an error");
             error!("{msg}: {e}");
+            if args.foreground {
+                println!("{msg}: {e}");
+            }
             ExitCode::FAILURE
         }
     }

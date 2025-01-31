@@ -1,5 +1,3 @@
-use rs1541::{Cbm, Device};
-
 use crate::bg::{OpResponse, Operation, Proc, MAX_BG_CHANNELS};
 use crate::drivemgr::DriveManager;
 use crate::ipc::{IpcServer, MAX_BG_RSP_CHANNELS};
@@ -7,6 +5,7 @@ use crate::locking_section;
 use crate::mount::Mount;
 
 use fs1541::error::{Error, Fs1541Error};
+use rs1541::Cbm;
 
 use flume::{Receiver, Sender};
 use log::{debug, error, info, trace, warn};
@@ -36,18 +35,15 @@ pub const CLEANUP_OVERALL_TIMER: Duration = Duration::from_secs(5);
 ///   let daemon = Arc::new(Mutex::new(Daemon(cbm)));
 #[derive(Debug)]
 #[allow(dead_code)]
-pub struct Daemon<D: Device>
-where
-    D: Send + Sync + 'static,
-{
+pub struct Daemon {
     // Process ID of this process - retrieve after daemonize (if present)
     pid: Pid,
 
     // Muted cbm object - which will be shared widely between threads
-    cbm: Arc<Mutex<Cbm<D>>>,
+    cbm: Arc<Mutex<Cbm>>,
 
     // DriveManager object to handle drives
-    drive_mgr: Arc<Mutex<DriveManager<D>>>,
+    drive_mgr: Arc<Mutex<DriveManager>>,
 
     // Mountpoints HashMap.  This is needed by DriveManager (and hence
     // MountService as DriveManager's creator) to check for the existence of
@@ -55,7 +51,7 @@ where
     // Note that Mount must be protected by a parking_lot RwLock not a tokio
     // one because the fuser thread has to be able to access it, from without
     // the tokio context
-    mountpoints: Arc<RwLock<HashMap<PathBuf, Arc<parking_lot::RwLock<Mount<D>>>>>>,
+    mountpoints: Arc<RwLock<HashMap<PathBuf, Arc<parking_lot::RwLock<Mount>>>>>,
 
     // Main tokio runtime
     runtime: Option<Arc<Mutex<Runtime>>>,
@@ -73,7 +69,7 @@ where
     ipc_server_handle: Option<JoinHandle<()>>,
 
     // Background Processor
-    bg_proc: Option<Arc<Mutex<Proc<D>>>>,
+    bg_proc: Option<Arc<Mutex<Proc>>>,
     bg_proc_handle: Option<JoinHandle<()>>,
 
     // Background response handler
@@ -88,11 +84,8 @@ where
     bg_listener_abort: Option<AbortHandle>,
 }
 
-impl<D: Device> Daemon<D>
-where
-    D: Send + Sync + 'static,
-{
-    pub fn new(pid: Pid, cbm: Arc<Mutex<Cbm<D>>>) -> Result<Self, Error> {
+impl Daemon {
+    pub fn new(pid: Pid, cbm: Arc<Mutex<Cbm>>) -> Result<Self, Error> {
         // Create channels - to send to the BackgroundProcess and for IpcServer
         // to receive back from it
         let (bg_proc_tx, bg_proc_rx) = flume::bounded(MAX_BG_CHANNELS);

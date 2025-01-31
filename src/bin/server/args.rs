@@ -1,5 +1,6 @@
 use clap::{ArgAction, Parser};
 use log::{log, log_enabled, Level};
+use rs1541::{DEFAULT_REMOTE_ADDR, DEFAULT_REMOTE_PORT};
 use std::env;
 use std::sync::OnceLock;
 
@@ -77,12 +78,29 @@ to provide a similar interface as to mounting of other filesystems.
 You mau run 1541fsd manually if you wish to provide fine-grained control of
 its arguments (decribed below).  However, 1541fs will also start a version of
 1541fsd automatically if it is not already running (but may need help to
-find it - see 1541fs --help for more details)."))]
+find it - see 1541fs --help for more details).
+
+You can set all 1541fsd arguments using environment variables.  This is the
+way to ensure 1541fsd is started with the values if auto-created by 1541fs."))]
 pub struct Args {
+    #[arg(
+        short = 'x',
+        long = "serial",
+        action = ArgAction::Set,
+        env = "XUM1541_SERIAL",
+        value_parser = clap::value_parser!(u8),
+        next_line_help = true,
+        help = "The serial number of the xum1541 to connect to",
+        long_help = "The serial number of the xum1541 to connect to.  A value\nof 0 with cause fs1541 to connect to the first xum1541\ndetected."
+    )]
+    pub serial: Option<u8>,
+
     #[arg(
         short = 'f',
         long = "foreground",
         action = ArgAction::SetTrue,
+        env = "FS1541_FOREGROUND",
+        value_parser = clap::value_parser!(bool),
         next_line_help = true,
         help = "Run in the foreground, do not daemonize",
         long_help = "Run in the foreground, do not daemonize.  This is useful for\ntesting and debugging, and for running 1541fsd under a process\nmanager like systemd."
@@ -93,6 +111,8 @@ pub struct Args {
         short = 's',
         long = "std",
         action = ArgAction::SetTrue,
+        env = "FS1541_STDOUT",
+        value_parser = clap::value_parser!(bool),
         next_line_help = true,
         help = "Log to stdout instead of syslog (default)",
         long_help = "Log to stdout instead of syslog.  This is useful for\ntesting and debugging, and for running 1541fsd under a process\nmanager like systemd."
@@ -100,8 +120,44 @@ pub struct Args {
     pub std_logging: bool,
 
     #[arg(
+        short = 'n',
+        long = "network",
+        action = ArgAction::SetTrue,
+        env = "XUM1541_NETWORK",
+        value_parser = clap::value_parser!(bool),
+        help_heading = "Network xum1541",
+        next_line_help = true,
+        help = "Connect to a network xum1541 device",
+        long_help = "Connects to a remote xum1541, hosted on a another machine,\n over an IP network.  The remote must be running\nxum1541::bin::remote-server."
+    )]
+    pub network: bool,
+
+    #[arg(
+        long = "remote-addr",
+        action = ArgAction::Set,
+        env = "XUM1541_REMOTE_ADDR",
+        help_heading = "Network xum1541",
+        next_line_help = true,
+        requires = "network",
+        help = format!("The IP address of the remote xum1541 device (default: {DEFAULT_REMOTE_ADDR})"),
+        long_help = format!("The IP address of the remote xum1541 device.  This is\nonly valid is --network is set.  Defaults to {DEFAULT_REMOTE_ADDR}.")
+    )]
+    pub remote_addr: Option<String>,
+
+    #[arg(
+        long = "remote-port",
+        action = ArgAction::Set,
+        env = "XUM1541_REMOTE_PORT",
+        help_heading = "Network xum1541",
+        next_line_help = true,
+        help = format!("The port of the remote xum1541 device (default: {DEFAULT_REMOTE_PORT})"),
+        long_help = format!("The port of the remote xum1541 device.  This is\nonly valid if --network is set.  Defaults to {DEFAULT_REMOTE_PORT}.")
+    )]
+    pub remote_port: Option<u16>,
+
+    #[arg(
         long,
-        env = "DIR_CACHE_EXPIRY_SECS",
+        env = "FS1541_DIR_CACHE_EXPIRY_SECS",
         default_value = "60",
         help_heading = "Cache Values",
         next_line_help = true,
@@ -112,7 +168,7 @@ pub struct Args {
 
     #[arg(
         long,
-        env = "FILE_CACHE_EXPIRY_SECS",
+        env = "FS1541_FILE_CACHE_EXPIRY_SECS",
         default_value = "300",
         help_heading = "Cache Values",
         next_line_help = true,
@@ -123,7 +179,7 @@ pub struct Args {
 
     #[arg(
         long,
-        env = "DIR_READ_TIMEOUT_SECS",
+        env = "FS1541_DIR_READ_TIMEOUT_SECS",
         default_value = "10",
         help_heading = "Timer Values",
         next_line_help = true,
@@ -134,7 +190,7 @@ pub struct Args {
 
     #[arg(
         long,
-        env = "FILE_READ_TIMEOUT_SECS",
+        env = "FS1541_FILE_READ_TIMEOUT_SECS",
         default_value = "30",
         help_heading = "Timer Values",
         next_line_help = true,
@@ -145,7 +201,7 @@ pub struct Args {
 
     #[arg(
         long,
-        env = "DIR_READ_SLEEP_MS",
+        env = "FS1541_DIR_READ_SLEEP_MS",
         default_value = "1000",
         help_heading = "Timer Values",
         next_line_help = true,
@@ -156,7 +212,7 @@ pub struct Args {
 
     #[arg(
         long,
-        env = "READ_READ_SLEEP_MS",
+        env = "FS1541_READ_READ_SLEEP_MS",
         default_value = "1000",
         help_heading = "Timer Values",
         next_line_help = true,
@@ -167,7 +223,7 @@ pub struct Args {
 
     #[arg(
         long,
-        env = "BG_AGE_CHECK_SECS",
+        env = "FS1541_BG_AGE_CHECK_SECS",
         default_value = "5",
         help_heading = "Timer Values",
         next_line_help = true,
@@ -178,7 +234,7 @@ pub struct Args {
 
     #[arg(
         long,
-        env = "DIR_ATTR_TTL_MS",
+        env = "FS1541_DIR_ATTR_TTL_MS",
         default_value = "5000",
         help_heading = "TTL Values",
         next_line_help = true,
@@ -189,7 +245,7 @@ pub struct Args {
 
     #[arg(
         long,
-        env = "FILE_ATTR_TTL_MS",
+        env = "FS1541_FILE_ATTR_TTL_MS",
         default_value = "5000",
         help_heading = "TTL Values",
         next_line_help = true,
@@ -200,7 +256,7 @@ pub struct Args {
 
     #[arg(
         long,
-        env = "DIR_LOOKUP_TTL_MS",
+        env = "FS1541_DIR_LOOKUP_TTL_MS",
         default_value = "5000",
         help_heading = "TTL Values",
         next_line_help = true,
@@ -211,7 +267,7 @@ pub struct Args {
 
     #[arg(
         long,
-        env = "FILE_LOOKUP_TTL_MS",
+        env = "FS1541_FILE_LOOKUP_TTL_MS",
         default_value = "5000",
         help_heading = "TTL Values",
         next_line_help = true,
@@ -225,7 +281,8 @@ pub struct Args {
         short = 'd',
         long = "autounmount",
         action = ArgAction::SetFalse,
-        help_heading = "Advanced",
+        env = "FS1541_AUTOUNMOUNT",
+        value_parser = clap::value_parser!(bool),
         next_line_help = true,
         long_help = "By default, 1541fs will automatically unmount the filesystem\nwhen it exits.  However, if it crashes and is unable to clean-\nup, fuser will cleanup and unmount the filesystem.  If you wish\nto disable this behaviour, set this option.")]
     pub autounmount: bool,
@@ -267,9 +324,26 @@ pub fn log_args(level: log::Level) {
     let args = get_args();
     log!(level, "--------- 1541fsd Arguments ----------");
     log!(level, "Standard args.........................");
+    if args.serial.is_some() {
+        log!(level, "  serial:      {}", args.serial.unwrap());
+    } else {
+        log!(level, "  serial:      <None>");
+    }
     log!(level, "  foreground:  {}", args.foreground);
     log!(level, "  std_logging: {}", args.std_logging);
     log!(level, "  autounmount: {}", args.autounmount);
+    log!(level, "Network xum1541 values ...............");
+    log!(level, "  network:      {}", args.network);
+    log!(
+        level,
+        "  remote_addr:  {}",
+        args.remote_addr.clone().unwrap_or("<None>".to_string())
+    );
+    if args.remote_port.is_some() {
+        log!(level, "  remote_port:  {}", args.remote_port.unwrap());
+    } else {
+        log!(level, "  remote_port:  <None>");
+    }
     log!(level, "Cache values..........................");
     log!(
         level,
@@ -317,8 +391,13 @@ pub fn log_args(level: log::Level) {
         args.file_lookup_ttl_ms
     );
     log!(level, "Logging settings......................");
-    log!(level, "  fuser:    {:?}", get_effective_level("fuser"));
-    log!(level, "  xum1541:  {:?}", get_effective_level("xum1541"));
-    log!(level, "  rs1541:   {:?}", get_effective_level("rs1541"));
-    log!(level, "  1541fsd:  {:?}", get_effective_level("1541fsd"));
+    log!(
+        level,
+        "  RUST_LOG:  {}",
+        env::var("RUST_LOG").unwrap_or("<None>".to_string())
+    );
+    log!(level, "  fuser:     {:?}", get_effective_level("fuser"));
+    log!(level, "  xum1541:   {:?}", get_effective_level("xum1541"));
+    log!(level, "  rs1541:    {:?}", get_effective_level("rs1541"));
+    log!(level, "  1541fsd:   {:?}", get_effective_level("1541fsd"));
 }

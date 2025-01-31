@@ -3,7 +3,6 @@ use fs1541::validate::{validate_mountpoint, ValidationType};
 use rs1541::{validate_device, CbmFileEntry, DeviceValidation};
 use rs1541::{
     Cbm, CbmDeviceInfo, CbmDirListing, CbmDriveUnit, CbmErrorNumber, CbmErrorNumberOk, CbmStatus,
-    Device,
 };
 
 use crate::args::get_args;
@@ -46,23 +45,20 @@ pub struct DirectoryCache {
 /// representation in the Linux filesystem.
 #[derive(Debug)]
 #[allow(dead_code)]
-pub struct Mount<D: Device>
-where
-    D: Send + Sync + 'static,
-{
+pub struct Mount {
     device_num: u8,
     mountpoint: PathBuf,
     _dummy_formats: bool,
-    cbm: Arc<Mutex<Cbm<D>>>,
-    drive_mgr: Arc<Mutex<DriveManager<D>>>,
-    drive_unit: Arc<RwLock<CbmDriveUnit<D>>>,
+    cbm: Arc<Mutex<Cbm>>,
+    drive_mgr: Arc<Mutex<DriveManager>>,
+    drive_unit: Arc<RwLock<CbmDriveUnit>>,
     bg_proc_tx: Arc<Sender<Operation>>,
     bg_rsp_tx: Arc<Sender<OpResponse>>,
     bg_rsp_rx: Option<Receiver<OpResponse>>,
     directory_cache: Arc<RwLock<DirectoryCache>>,
     fuser: Option<Arc<Mutex<BackgroundSession>>>,
     next_inode: u64,
-    shared_self: Option<Arc<parking_lot::RwLock<Mount<D>>>>,
+    shared_self: Option<Arc<parking_lot::RwLock<Mount>>>,
     bg_rsp_handle: Option<JoinHandle<()>>,
     dir_outstanding: bool,
     drive_info: Option<CbmDeviceInfo>,
@@ -70,10 +66,7 @@ where
     disk_info: Vec<DiskInfo>,
 }
 
-impl<D: Device> fmt::Display for Mount<D>
-where
-    D: Send + Sync + 'static,
-{
+impl fmt::Display for Mount {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -85,10 +78,7 @@ where
 }
 
 #[allow(dead_code)]
-impl<D: Device> Mount<D>
-where
-    D: Send + Sync + 'static,
-{
+impl Mount {
     /// While this function does cause the DriveUnit to be created within
     /// DriveManager, it will not insert Mount into mountpaths.  The caller
     /// must do that.  DriveManager will, as part of creating the DriveUnit
@@ -99,9 +89,9 @@ where
         device_num: u8,
         mountpoint: P,
         dummy_formats: bool,
-        cbm: Arc<Mutex<Cbm<D>>>,
-        drive_mgr: Arc<Mutex<DriveManager<D>>>,
-        drive_unit: Arc<RwLock<CbmDriveUnit<D>>>,
+        cbm: Arc<Mutex<Cbm>>,
+        drive_mgr: Arc<Mutex<DriveManager>>,
+        drive_unit: Arc<RwLock<CbmDriveUnit>>,
         bg_proc_tx: Arc<Sender<Operation>>,
     ) -> Result<Self, Error> {
         // Create a flume channel for receiving reponses from Background
@@ -492,7 +482,7 @@ where
 
     pub fn set_shared_self(
         &mut self,
-        shared_self: Arc<parking_lot::RwLock<Mount<D>>>,
+        shared_self: Arc<parking_lot::RwLock<Mount>>,
     ) -> Result<(), Error> {
         if self.shared_self.is_some() {
             Err(Error::Fs1541 {
@@ -549,7 +539,7 @@ where
         Ok(())
     }
 
-    fn process_bg_response(shared_self: Arc<parking_lot::RwLock<Mount<D>>>, response: OpResponse) {
+    fn process_bg_response(shared_self: Arc<parking_lot::RwLock<Mount>>, response: OpResponse) {
         let rsp = if let Err(e) = response.rsp {
             warn!("Received BG processor Error response: {}", e);
             return;
@@ -623,7 +613,7 @@ where
     }
 
     pub fn handle_bg_responses(
-        shared_self: Arc<parking_lot::RwLock<Mount<D>>>,
+        shared_self: Arc<parking_lot::RwLock<Mount>>,
         rx: Receiver<OpResponse>,
         mountpoint: PathBuf,
     ) {

@@ -6,7 +6,7 @@ use crate::mountsvc::MountService;
 use fs1541::error::{Error, Fs1541Error};
 /// Background processing - provides a single worker thread which handles IPC
 /// and background tasks on behalf of Mounts
-use rs1541::{Cbm, CbmDeviceInfo, CbmDirListing, CbmStatus, CbmString, Device};
+use rs1541::{Cbm, CbmDeviceInfo, CbmDirListing, CbmStatus, CbmString};
 
 use flume::{Receiver, Sender};
 use log::{debug, error, info, trace, warn};
@@ -572,32 +572,26 @@ impl OperationQueues {
 /// Processes background operations in priority order
 #[derive(Debug)]
 #[allow(dead_code)]
-pub struct Proc<D: Device>
-where
-    D: Send + Sync + 'static,
-{
+pub struct Proc {
     queues: OperationQueues,
     operation_receiver: Receiver<Operation>,
     operation_sender: Arc<Sender<Operation>>,
     last_cleanup: Instant,
     shutdown: Arc<AtomicBool>,
-    cbm: Arc<Mutex<Cbm<D>>>,
-    drive_mgr: Arc<Mutex<DriveManager<D>>>,
-    mount_svc: MountService<D>,
+    cbm: Arc<Mutex<Cbm>>,
+    drive_mgr: Arc<Mutex<DriveManager>>,
+    mount_svc: MountService,
     age_check_period: Duration,
 }
 
-impl<D: Device> Proc<D>
-where
-    D: Send + Sync + 'static,
-{
+impl Proc {
     pub fn new(
         operation_receiver: Receiver<Operation>,
         operation_sender: Arc<Sender<Operation>>,
         shutdown: Arc<AtomicBool>,
-        cbm: Arc<Mutex<Cbm<D>>>,
-        drive_mgr: Arc<Mutex<DriveManager<D>>>,
-        mountpoints: Arc<RwLock<HashMap<PathBuf, Arc<parking_lot::RwLock<Mount<D>>>>>>,
+        cbm: Arc<Mutex<Cbm>>,
+        drive_mgr: Arc<Mutex<DriveManager>>,
+        mountpoints: Arc<RwLock<HashMap<PathBuf, Arc<parking_lot::RwLock<Mount>>>>>,
     ) -> Self {
         let mount_svc = MountService::new(cbm.clone(), drive_mgr.clone(), mountpoints);
         Self {
