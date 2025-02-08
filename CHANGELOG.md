@@ -1,7 +1,11 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [0.3.0] - 2025-??-??
+## [0.3.1] - 2025-02-08
+### Changed
+- Moved to rs1541 0.3.1 (to pick up xum 0.3.1 serial number fix)
+
+## [0.3.0] - 2025-01-31
 ### Added
 - install.sh script and udev rules file for xum1541
 

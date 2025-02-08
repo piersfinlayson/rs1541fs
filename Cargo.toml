@@ -1,6 +1,6 @@
 [package]
 name = "fs1541"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 authors = ["Piers Finlayson <piers@piers.rocks>"]
 description = "1541fs - A native Linux filesystem for Commodore disk drives"
@@ -20,7 +20,7 @@ name = "1541fs"
 path = "src/bin/client/main.rs"
 
 [dependencies]
-rs1541 = { version = "0.3.0" }
+rs1541 = { version = "0.3.1" }
 fuser = "0.15"
 clap = { version = "4.5", features = ["derive", "env"] }
 env_logger = "0.11"
