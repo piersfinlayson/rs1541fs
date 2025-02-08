@@ -20,10 +20,11 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 Install the dependencies:
 * libfuse for FUSE filesystem support
+* pkg-config to build libfuse
 * libusb 1.0 used to access the xum1541
 
 ```
-sudo apt install libfuse-dev libusb-1.0-0-dev
+sudo apt install libfuse-dev pkg-config libusb-1.0-0-dev
 ```
 
 Clone this project
