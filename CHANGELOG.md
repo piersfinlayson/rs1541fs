@@ -1,6 +1,10 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [0.3.2] - 2025-??-??
+### Added
+- Used BusRecoveryType::Serial to auto recover for some xum1541 failures, but only if the same serial number xum1541 is detected
+
 ## [0.3.1] - 2025-02-08
 ### Changed
 - Moved to rs1541 0.3.1 (to pick up xum 0.3.1 serial number fix)

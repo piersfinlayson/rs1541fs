@@ -14,7 +14,7 @@ use daemon::Daemon;
 use fs1541::error::{Error, Fs1541Error};
 use fs1541::ipc::DAEMON_PID_FILENAME;
 use fs1541::logging::init_logging;
-use rs1541::Cbm;
+use rs1541::{BusRecoveryType, Cbm};
 use rs1541::{DEFAULT_REMOTE_ADDR, DEFAULT_REMOTE_PORT};
 
 use daemonize::Daemonize;
@@ -172,8 +172,12 @@ async fn async_main(args: &Args) -> Result<(), Error> {
             )
         }
     };
-    let cbm = Cbm::new(args.serial, remote).map_err(|e| Error::Rs1541 {
+    let mut cbm = Cbm::new(args.serial, remote).map_err(|e| Error::Rs1541 {
         message: "Failed to initialize USB xum1541".into(),
+        error: e,
+    })?;
+    cbm.set_bus_recovery_type(BusRecoveryType::Serial).map_err( |e| Error::Rs1541 {
+        message: "Failed to set bus recovery type to serial".into(),
         error: e,
     })?;
 
